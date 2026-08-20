@@ -460,9 +460,7 @@ Expected: PASS — 3 tests.
 
 Run:
 ```bash
-npx vitest run src/hci.test.ts && node --input-type=module -e "
-import {fetchVehicles} from './src/hci.ts'
-" 2>/dev/null || npx tsx -e "
+npx tsx -e "
 import {fetchVehicles} from './src/hci.ts'
 const v = await fetchVehicles({north: 52.68, west: 13.08, south: 52.34, east: 13.76})
 const by = {}
@@ -471,7 +469,7 @@ console.log('vehicles:', v.length, JSON.stringify(by))
 console.log('sample:', JSON.stringify(v[0]))
 "
 ```
-Expected: `vehicles: ~283`, products `{suburban: ~105, subway: ~55, tram: ~120}` (time-of-day dependent), sample has line/pos/nextStop. If network fails, retry once, then continue.
+Expected: `vehicles: ~283`, products `{suburban: ~105, subway: ~55, tram: ~120}` (time-of-day dependent), sample has line/pos/nextStop. If the network fails, retry once, then continue (upstream is external).
 
 **Step 6: Commit**
 
