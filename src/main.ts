@@ -12,12 +12,24 @@ const MAX_BACKOFF_MS = 60000
 const PRODUCT_COLORS: Record<Product, string> = {suburban: '#2e7d32', subway: '#1565c0', tram: '#c62828'}
 const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram'}
 
-const mapOptions: L.MapOptions & {smoothWheelZoom?: boolean} = {
-  smoothWheelZoom: true,
-  zoomSnap: 0,
-  wheelPxPerZoomLevel: 30
-}
-const map = L.map('map', mapOptions).setView([52.52, 13.405], 12)
+const map = L.map('map', {
+  scrollWheelZoom: false, // replaced by custom continuous handler below
+  zoomSnap: 0
+}).setView([52.52, 13.405], 12)
+// Continuous trackpad zoom: Leaflet's built-in handler compresses wheel input
+// through a sigmoid (soft-caps ~4 levels/gesture) and animates each step
+// (~250ms), which feels slow. Handle wheel directly: instant fractional zoom
+// at the cursor, proportional to scroll delta, no cap.
+const ZOOM_PER_PX = 0.01
+const MAX_ZOOM_PER_EVENT = 2.5
+map.getContainer().addEventListener('wheel', (e: WheelEvent) => {
+  if (e.ctrlKey) return // leave browser pinch-zoom to the browser
+  e.preventDefault()
+  const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
+  if (delta === 0) return
+  const step = Math.max(-MAX_ZOOM_PER_EVENT, Math.min(MAX_ZOOM_PER_EVENT, -delta * ZOOM_PER_PX))
+  map.setZoomAround([e.clientY, e.clientX], map.getZoom() + step, {animate: false})
+}, {passive: false})
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
