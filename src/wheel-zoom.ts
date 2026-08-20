@@ -1,23 +1,43 @@
 import L from 'leaflet'
 
-// Continuous, fast wheel zoom, ported from the common practice of the major
-// web-map engines:
-// - MapLibre GL JS `ScrollZoomHandler` (Apache-2.0): type detection, per-type
-//   zoom rates, sigmoid-compressed per-frame cap, 200ms ease-out for discrete
-//   wheel notches. https://github.com/maplibre/maplibre-gl-js
-// - OpenLayers `MouseWheelZoom`: DOM_DELTA_LINE/PAGE multipliers.
+// Google-Maps-style wheel zoom for Leaflet, built on the common practice of
+// the major web-map engines:
+// - MapLibre GL JS `ScrollZoomHandler` (Apache-2.0): input-type detection
+//   (trackpad vs discrete wheel), per-type zoom rates, sigmoid-compressed
+//   scale cap. https://github.com/maplibre/maplibre-gl-js
+// - OpenLayers `MouseWheelZoom`: DOM_DELTA_LINE/PAGE multipliers, per-event
+//   fractional trackpad zoom.
+// - Leaflet `ScrollWheelZoomHandler`: disabled here (see below).
+//
+// Divergence from OSS practice, per explicit requirement: **zoom fling**.
+// MapLibre explicitly returns `noInertia: true` for scroll zoom, OpenLayers
+// has no zoom inertia, and Leaflet's inertia covers panning only — zoom
+// inertia exists nowhere in the OSS ecosystem. The decaying-velocity glide
+// after the gesture ends is a Google Maps signature; this adds it.
+//
+// Design note: everything is synchronous per wheel event plus two bounded,
+// self-clearing setTimeout timers (MapLibre's 40ms first-event disambiguation
+// and the fling glide) — no requestAnimationFrame loop. A dead rAF loop
+// previously left the map frozen and blank; a bounded timer chain can only
+// stop early, never wedge.
 //
 // Leaflet's built-in handler is disabled (`scrollWheelZoom: false`): it
 // compresses a whole gesture through a sigmoid that soft-caps at ~4 zoom
 // levels and animates every step (~250ms), which feels slow.
 
 const WHEEL_DELTA_STEP = 4.000244140625 // MapLibre: unit of one mouse-wheel notch
-const TRACKPAD_ZOOM_RATE = 1 / 100 // MapLibre defaultZoomRate
+const TRACKPAD_ZOOM_RATE = 1 / 100 // MapLibre defaultZoomRate (100px per zoom level)
 const WHEEL_ZOOM_RATE = 1 / 450 // MapLibre wheelZoomRate
-const MAX_SCALE_PER_FRAME = 2 // MapLibre maxScalePerFrame (~1 zoom level per frame)
-const EASE_MS = 200 // MapLibre _smoothOutEasing(200)
+const MAX_SCALE_PER_EVENT = 2 // MapLibre maxScalePerFrame (~1 zoom level per event)
 const LINE_DELTA_MULTIPLIER = 40 // OpenLayers / MapLibre DOM_DELTA_LINE
 const PAGE_DELTA_MULTIPLIER = 300 // OpenLayers DOM_DELTA_PAGE
+
+// fling (inertia) tuning
+const FLING_DETECT_MS = 60 // input gap after which the gesture counts as ended
+const GLIDE_STEP_MS = 16
+const GLIDE_DECAY_MS = 150 // exponential velocity decay constant
+const GLIDE_MAX_MS = 600 // hard cap so the glide always terminates
+const GLIDE_MIN_VELOCITY = 0.0002 // zoom/ms; stop gliding below this
 
 export type WheelType = 'wheel' | 'trackpad' | null
 
@@ -43,69 +63,61 @@ export function classifyWheel(prev: WheelType, value: number, timeDelta: number)
   return prev
 }
 
-// cubic ease-out, close to MapLibre's bezier(0, 0, 0.15, 1)
-const easeOut = (t: number): number => 1 - Math.pow(1 - t, 3)
-
 /**
- * Replace the map's wheel zoom with a continuous, responsive implementation:
- * accumulate deltas, consume once per render frame with a per-frame scale cap
- * (no runaway), ease discrete wheel notches over 200ms, trackpads follow the
- * input directly (fractional zoom). Shift = precision zoom. Ctrl (browser
- * pinch-zoom) passes through untouched. Zoom is anchored at the cursor.
- * Returns a disposer.
+ * Replace the map's wheel zoom with Google-Maps-style behavior: 1:1 trackpad
+ * tracking at the cursor, per-event scale cap, and a fling glide after the
+ * gesture ends (decaying velocity, like Google Maps). Shift = precision zoom;
+ * Ctrl (browser pinch-zoom) passes through untouched. Returns a disposer.
  */
 export function enableSmoothWheelZoom(map: L.Map): () => void {
   const container = map.getContainer()
 
   let type: WheelType = null
   let lastWheelTime = 0
-  let lastValue = 0
-  let delta = 0
-  let startZoom = map.getZoom()
-  let targetZoom = map.getZoom()
-  let animStart = 0
-  let needsFrame = false
-  let raf: number | null = null
-  let gestureTimeout: number | null = null
-  let anchor = map.latLngToContainerPoint(map.getCenter()) // L.Point, cursor fallback
+  let lastEventTime = 0
+  let lastValue = 0 // pending ambiguous first event of a gesture
+  let velocity = 0 // smoothed zoom/ms for the fling
+  let glideTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingTimer: ReturnType<typeof setTimeout> | null = null
+  let lastAnchor = map.latLngToContainerPoint(map.getCenter())
 
-  const scheduleFrame = (): void => {
-    if (!needsFrame) {
-      needsFrame = true
-      raf = requestAnimationFrame(renderFrame)
-    }
+  const applyZoom = (dZoom: number): void => {
+    const zoom = map.getZoom() + dZoom
+    if (!Number.isFinite(zoom)) return
+    map.setZoomAround(lastAnchor, zoom, {animate: false})
   }
 
-  const renderFrame = (now: number): void => {
-    raf = null
-    if (!needsFrame) return
-    needsFrame = false
-
-    if (delta !== 0) {
-      // consume the accumulated delta once per frame; the sigmoid compresses
-      // bursts so a fast scroll can't move more than ~1 level per frame
-      const rate = type === 'wheel' && Math.abs(delta) > WHEEL_DELTA_STEP
-        ? WHEEL_ZOOM_RATE
-        : TRACKPAD_ZOOM_RATE
-      let scale = MAX_SCALE_PER_FRAME / (1 + Math.exp(-Math.abs(delta * rate)))
-      if (delta < 0 && scale !== 0) scale = 1 / scale
-      startZoom = map.getZoom()
-      targetZoom = startZoom + Math.log2(scale)
-      if (type === 'wheel') animStart = now
-      delta = 0
+  const startGlide = (): void => {
+    if (Math.abs(velocity) < GLIDE_MIN_VELOCITY) return
+    const start = performance.now()
+    const step = (): void => {
+      const t = performance.now() - start
+      const v = velocity * Math.exp(-t / GLIDE_DECAY_MS)
+      if (Math.abs(v) < GLIDE_MIN_VELOCITY || t >= GLIDE_MAX_MS) return
+      applyZoom(v * GLIDE_STEP_MS)
+      glideTimer = setTimeout(step, GLIDE_STEP_MS)
     }
+    glideTimer = setTimeout(step, GLIDE_STEP_MS)
+  }
 
-    let zoom: number
-    if (type === 'wheel') {
-      const t = Math.min((now - animStart + 5) / EASE_MS, 1)
-      zoom = startZoom + (targetZoom - startZoom) * easeOut(t)
-      if (t < 1) needsFrame = true
-    } else {
-      zoom = targetZoom
-    }
+  /** Apply one scroll step: sigmoid-capped fractional zoom + velocity update. */
+  const applyGesture = (value: number): void => {
+    const rate = type === 'wheel' ? WHEEL_ZOOM_RATE : TRACKPAD_ZOOM_RATE
+    let scale = MAX_SCALE_PER_EVENT / (1 + Math.exp(-Math.abs(value * rate)))
+    if (value > 0 && scale !== 0) scale = 1 / scale // scroll down = zoom out
+    const step = Math.log2(scale)
 
-    map.setZoomAround(anchor, zoom, {animate: false})
-    if (needsFrame) scheduleFrame()
+    const prevZoom = map.getZoom()
+    applyZoom(step)
+    const now = performance.now()
+    const dt = Math.max(now - lastEventTime, 1)
+    velocity = velocity * 0.5 + ((map.getZoom() - prevZoom) / dt) * 0.5 // EMA
+    lastEventTime = now
+
+    // if no more input arrives within FLING_DETECT_MS, glide with the
+    // remaining velocity (fling / inertia)
+    if (glideTimer !== null) clearTimeout(glideTimer)
+    glideTimer = setTimeout(startGlide, FLING_DETECT_MS)
   }
 
   const onWheel = (e: WheelEvent): void => {
@@ -117,39 +129,50 @@ export function enableSmoothWheelZoom(map: L.Map): () => void {
     const now = performance.now()
     const timeDelta = now - lastWheelTime
     lastWheelTime = now
-    anchor = map.mouseEventToContainerPoint(e)
+    lastAnchor = map.mouseEventToContainerPoint(e)
 
     if (timeDelta > 400) {
-      // new gesture: a lone event is a mouse-wheel notch, delayed 40ms
-      // (MapLibre `_onTimeout`) so a repeating trackpad isn't misread
-      type = null
-      lastValue = value
-      if (gestureTimeout !== null) clearTimeout(gestureTimeout)
-      gestureTimeout = window.setTimeout(() => {
-        type = 'wheel'
-        delta -= lastValue
-        scheduleFrame()
-      }, 40)
+      // new gesture: unambiguous values classify directly; ambiguous ones
+      // wait 40ms for a repeat (trackpad stream) else resolve as a single
+      // wheel notch (MapLibre `_onTimeout`)
+      const first = classifyWheel(null, value, timeDelta)
+      if (first !== null) {
+        type = first
+        applyGesture(value)
+      } else {
+        type = null
+        lastValue = value
+        if (pendingTimer !== null) clearTimeout(pendingTimer)
+        pendingTimer = setTimeout(() => {
+          pendingTimer = null
+          if (type === null) {
+            type = 'wheel'
+            applyGesture(lastValue)
+          }
+        }, 40)
+      }
       return
     }
 
-    const next = classifyWheel(type, value, timeDelta)
-    if (type === null && gestureTimeout !== null) {
-      // previous event was ambiguous; merge it into this one
-      clearTimeout(gestureTimeout)
-      gestureTimeout = null
+    if (type === null && pendingTimer !== null) {
+      // the ambiguous first event repeats: it is a trackpad stream
+      clearTimeout(pendingTimer)
+      pendingTimer = null
       value += lastValue
+      type = classifyWheel(null, value, timeDelta) ?? 'trackpad'
+    } else {
+      const next = classifyWheel(type, value, timeDelta)
+      if (next !== null) type = next
     }
-    type = next
-    delta -= value
-    scheduleFrame()
+    if (type === null) return
+    applyGesture(value)
   }
 
   container.addEventListener('wheel', onWheel, {passive: false})
 
   return () => {
     container.removeEventListener('wheel', onWheel)
-    if (raf !== null) cancelAnimationFrame(raf)
-    if (gestureTimeout !== null) clearTimeout(gestureTimeout)
+    if (glideTimer !== null) clearTimeout(glideTimer)
+    if (pendingTimer !== null) clearTimeout(pendingTimer)
   }
 }
