@@ -4,6 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {Product, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
+import {enableSmoothWheelZoom} from './wheel-zoom.js'
 
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
 const POLL_INTERVAL_MS = 20000
@@ -13,23 +14,10 @@ const PRODUCT_COLORS: Record<Product, string> = {suburban: '#2e7d32', subway: '#
 const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram'}
 
 const map = L.map('map', {
-  scrollWheelZoom: false, // replaced by custom continuous handler below
+  scrollWheelZoom: false, // replaced by enableSmoothWheelZoom below
   zoomSnap: 0
 }).setView([52.52, 13.405], 12)
-// Continuous trackpad zoom: Leaflet's built-in handler compresses wheel input
-// through a sigmoid (soft-caps ~4 levels/gesture) and animates each step
-// (~250ms), which feels slow. Handle wheel directly: instant fractional zoom
-// at the cursor, proportional to scroll delta, no cap.
-const ZOOM_PER_PX = 0.01
-const MAX_ZOOM_PER_EVENT = 2.5
-map.getContainer().addEventListener('wheel', (e: WheelEvent) => {
-  if (e.ctrlKey) return // leave browser pinch-zoom to the browser
-  e.preventDefault()
-  const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
-  if (delta === 0) return
-  const step = Math.max(-MAX_ZOOM_PER_EVENT, Math.min(MAX_ZOOM_PER_EVENT, -delta * ZOOM_PER_PX))
-  map.setZoomAround([e.clientY, e.clientX], map.getZoom() + step, {animate: false})
-}, {passive: false})
+enableSmoothWheelZoom(map)
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
