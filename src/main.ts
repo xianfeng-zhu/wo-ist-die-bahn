@@ -15,7 +15,7 @@ const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-
 const mapOptions: L.MapOptions & {smoothWheelZoom?: boolean} = {
   smoothWheelZoom: true,
   zoomSnap: 0,
-  wheelPxPerZoomLevel: 60
+  wheelPxPerZoomLevel: 30
 }
 const map = L.map('map', mapOptions).setView([52.52, 13.405], 12)
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
