@@ -66,12 +66,21 @@ One poll serves all connected viewers. Full-snapshot broadcast (~50 KB per 20 s)
 
 ### Frontend
 
-- Leaflet + OSM raster tiles, centered on Berlin.
-- Canvas marker layer; product colors: S-Bahn green, U-Bahn blue, tram red.
-- Filter chips (S/U/tram) with live count.
-- Click marker → popup: line, direction, next stop, delay badge (red if ≥ 5 min).
-- Status bar: connection state (live/stale/offline), vehicle count, "updated N s ago".
+- Leaflet + OSM raster tiles, centered on Berlin. Mobile-friendly (full-height map, thumb-sized controls).
+- **Vehicle layer** — line-labeled badges (e.g. "S7", "U2", "M10") colored with VBB's official line colors (from the `linienfarben` dataset), mode-color fallback. Click → popup: line, direction, next stop, delay badge (red if ≥ 5 min).
+- **Station layer** (toggle) — rail stops from GTFS `stops.txt`, small dots, name popup.
+- **Route layer** (toggle) — rail route polylines from GTFS `shapes.txt`, colored by line.
+- Mode filter chips (S/U/tram) with live count; layer checkboxes (Stations, Routes).
+- Status bar: connection state (live / stale / offline), vehicle count, "updated N s ago". English UI.
 - v1 movement: `setLatLng` per snapshot. Radar `frames` interpolation = later upgrade, not v1.
+
+### Static data assets (build-time, committed)
+
+- `web/scripts/prepare-data.mjs` — one-off prep script, kept for refresh:
+  - Downloads VBB GTFS zip (~82 MB, verified reachable; updated 2× weekly) from `unternehmen.vbb.de/gtfs`.
+  - Extracts rail stops + route shapes (tram/subway/S-Bahn), filters out bus/regional by `route_type` + line-name pattern.
+  - Emits `web/public/stations.json` and `web/public/routes.json` (GeoJSON, shape-decimated).
+  - Downloads `linienfarben.zip` (line colors CSV) → generates `web/src/line-colors.ts`.
 
 ## Error handling
 
@@ -92,7 +101,15 @@ One poll serves all connected viewers. Full-snapshot broadcast (~50 KB per 20 s)
 
 ## Non-goals (v1)
 
-Bus display, historical tracking, per-line colors (VBB `linienfarben` dataset later), vehicle-follow mode, auth, multi-instance fan-out (needs Redis).
+Bus display, historical tracking, vehicle-follow mode, auth, multi-instance fan-out (needs Redis).
+
+## Product decisions (user-confirmed 2026-08-20)
+
+1. **Update mechanism** — server polls HAFAS every 20 s (request-based, server-side only); browsers get updates via SSE server push. No per-user requests.
+2. **Markers** — line-labeled badges in official line colors.
+3. **Layers** — vehicles + stations toggle + routes toggle (VBB-style map).
+4. **Language** — English UI; station/direction names stay German (as delivered).
+5. **Devices** — mobile-friendly.
 
 ## Decisions
 

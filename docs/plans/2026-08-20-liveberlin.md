@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** A public web app showing real-time positions of Berlin S-Bahn, U-Bahn, and tram vehicles on a Leaflet map, updated every ~20 s via SSE push.
+**Goal:** A public web app showing real-time positions of Berlin S-Bahn, U-Bahn, and tram vehicles on a Leaflet map — line-labeled badges in official colors, plus toggleable station and route layers — updated every ~20 s via server push (SSE).
 
-**Architecture:** Single-process TypeScript app. Node/Express server polls the HAFAS `radar` endpoint (VBB or BVG profile, env-switchable) every 20 s, keeps an in-memory snapshot, and broadcasts it to all browsers over SSE. Frontend is a Vite + vanilla TS SPA with Leaflet canvas markers, product filters, and click popups. One Docker container deploys everything.
+**Architecture:** Single-process TypeScript app. Node/Express server polls the HAFAS `radar` endpoint (VBB or BVG profile, env-switchable) every 20 s, keeps an in-memory snapshot, and pushes it to all browsers over SSE (request-based only between server ↔ HAFAS; push-based between server ↔ browsers). Frontend is a Vite + vanilla TS SPA with Leaflet: vehicle badges, station dots and route polylines from committed static GeoJSON assets. One Docker container deploys everything.
 
 **Tech Stack:** TypeScript 5, Node ≥ 20, Express 4, `hafas-client@6` (VBB/BVG profiles), Vite, Leaflet + `@types/leaflet`, vitest, npm workspaces, Docker.
 
@@ -13,7 +13,9 @@
 - Movement shape: `{ tripId, direction, line: {name, product}, location: {latitude, longitude}, nextStopovers: [{stop: {name}, arrivalDelay, departureDelay}] }`. No `id` field → use `tripId` as vehicle id.
 - FPTF delay fields are **minutes**. Products: `suburban`, `subway`, `tram`, `bus`, `regional`, `express`.
 - No CORS on mgate → backend proxy mandatory. Both endpoints reachable from Node without auth.
-- VBB's own Fahrinfo webapp (inspected live): its "Live map" shows stations/routes/multi-mobility/traffic messages only — no vehicles. It uses the same HAFAS backend (`fahrinfo.vbb.de/gate`, AID `hafas-vbb-webapp`) that `hafas-client`'s vbb profile uses. Our app goes one step further with `radar`.
+- VBB's own Fahrinfo webapp (inspected live): its "Live map" shows stations/routes/multi-mobility/traffic messages only — no vehicles. Same HAFAS backend (`fahrinfo.vbb.de/gate`, AID `hafas-vbb-webapp`) that `hafas-client`'s vbb profile uses. Our app adds `radar` on top.
+- VBB GTFS static feed (`unternehmen.vbb.de/gtfs`): 82,102,439 bytes zip, reachable, updated 2× weekly — source for stations (stops.txt) and route shapes (shapes.txt).
+- VBB line colors: `unternehmen.vbb.de/fileadmin/user_upload/VBB/Dokumente/API-Datensaetze/linienfarben.zip` (CSV with hex values).
 
 ---
 **Ground rules:** @test-driven-development (test first, red → green), @verification-before-completion (no success claims without running the command), @using-git-worktrees (skip here — repo is new, main branch is empty of code). Commit after every green step. Skip formatters/linters except a final `tsc --noEmit` per workspace.
@@ -117,16 +119,16 @@ dist/
 **Step 3: Web scaffold**
 
 Run: `npm create vite@latest web -- --template vanilla-ts`
-Expected: `web/` created with `index.html`, `src/main.ts`, `src/style.css`, `src/typescript.svg`, `src/counter.ts`, `web/package.json`. Delete `web/src/counter.ts` and `web/src/typescript.svg` (not needed).
+Expected: `web/` created with `index.html`, `src/main.ts`, `src/style.css`, `src/typescript.svg`, `src/counter.ts`, `web/package.json`. Delete `web/src/counter.ts` and `web/src/typescript.svg`.
 
-Run: `npm install` (at repo root — creates one lockfile, hoists workspace deps)
+Run: `npm install` (at repo root — one lockfile, hoisted workspace deps)
 Run: `npm install leaflet --workspace=web && npm install -D @types/leaflet vitest --workspace=web`
 Expected: no errors; `npm ls leaflet` resolves.
 
 **Step 4: Verify scaffold**
 
-Run: `npm run build --workspace=server` (tsc, empty src → succeeds, creates `dist/`), `npm run build --workspace=web`
-Expected: both succeed. `git status` clean of `node_modules`/`dist` (gitignore works).
+Run: `npm run build --workspace=server` (tsc, empty src → succeeds), `npm run build --workspace=web`
+Expected: both succeed. `git status` clean of `node_modules`/`dist`.
 
 **Step 5: Commit**
 
@@ -355,7 +357,7 @@ const v = await createUpstream().getVehicles({north: 52.68, west: 13.08, south: 
 console.log('vehicles:', v.length, '| sample:', JSON.stringify(v[0]))
 "
 ```
-Expected: `vehicles: ~280` (rail only; varies by time of day), sample shows line/product/lat/lon. If network is down, this step fails — retry once, then continue (upstream is external).
+Expected: `vehicles: ~280` (rail only; varies by time of day). If the network is down, retry once, then continue (upstream is external).
 
 **Step 6: Commit**
 
@@ -412,12 +414,10 @@ describe('Poller', () => {
 
     expect(poller.getSnapshot().stale).toBe(true)
 
-    // 100ms (normal interval) is not enough after a failure -> still stale
     await vi.advanceTimersByTimeAsync(100)
     expect(upstream.getVehicles).toHaveBeenCalledTimes(1)
     expect(poller.getSnapshot().stale).toBe(true)
 
-    // backoff interval (200ms) elapses -> next attempt succeeds
     await vi.advanceTimersByTimeAsync(200)
     expect(upstream.getVehicles).toHaveBeenCalledTimes(2)
     expect(poller.getSnapshot()).toMatchObject({stale: false, vehicles: [{id: 'b'}]})
@@ -666,7 +666,7 @@ git add server/src/sse.ts server/src/server.ts server/src/server.test.ts && git 
 
 ---
 
-### Task 6: Web scaffold — map renders Berlin
+### Task 6: Web scaffold — map shell + mobile styles
 
 **Files:**
 - Modify: `web/index.html`
@@ -701,26 +701,49 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 export {map}
 ```
 
-**Step 2: Style**
+**Step 2: Style (desktop + mobile)**
 
-`web/src/style.css` — replace with:
+`web/src/style.css`:
 ```css
 html, body, #map { height: 100%; margin: 0; }
-#statusbar { position: fixed; top: 10px; left: 10px; z-index: 1000; background: rgba(255,255,255,.9); padding: 6px 10px; border-radius: 6px; font: 13px system-ui; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-#filters { position: fixed; top: 10px; right: 10px; z-index: 1000; background: rgba(255,255,255,.9); padding: 8px; border-radius: 6px; font: 13px system-ui; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-#filters label { display: block; margin: 2px 0; cursor: pointer; }
-#attribution { position: fixed; bottom: 4px; right: 6px; z-index: 1000; font: 11px system-ui; color: #555; background: rgba(255,255,255,.7); padding: 2px 6px; border-radius: 4px; }
+body { font: 13px system-ui, sans-serif; }
+#statusbar {
+  position: fixed; top: 10px; left: 10px; z-index: 1000;
+  background: rgba(255,255,255,.92); padding: 6px 10px; border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+#filters {
+  position: fixed; top: 10px; right: 10px; z-index: 1000;
+  background: rgba(255,255,255,.92); padding: 8px 10px; border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+#filters .mode { display: flex; gap: 6px; margin-bottom: 6px; }
+#filters .layer { display: block; margin: 2px 0; cursor: pointer; }
+#attribution {
+  position: fixed; bottom: 4px; right: 6px; z-index: 1000;
+  font: 11px system-ui; color: #555; background: rgba(255,255,255,.7);
+  padding: 2px 6px; border-radius: 4px;
+}
+@media (max-width: 640px) {
+  #statusbar { top: 8px; left: 8px; font-size: 12px; }
+  #filters {
+    top: auto; bottom: 8px; left: 8px; right: 8px;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  #filters .mode { margin-bottom: 0; }
+  .leaflet-top { top: 44px; }
+}
 ```
 
 **Step 3: Verify**
 
 Run: `npm run dev --workspace=web` (background), open `http://localhost:5173` in browser (@frontend-design, @verification-before-completion)
-Expected: map of Berlin renders with OSM tiles, no console errors. Stop dev server.
+Expected: map of Berlin renders with OSM tiles, no console errors; at narrow width the filters bar moves to the bottom. Stop dev server.
 
 **Step 4: Commit**
 
 ```bash
-git add web/ && git commit -m "feat(web): leaflet map shell"
+git add web/ && git commit -m "feat(web): leaflet map shell with mobile styles"
 ```
 
 ---
@@ -810,7 +833,77 @@ git add web/src/vehicles.ts web/src/vehicles.test.ts web/package.json && git com
 
 ---
 
-### Task 8: Live map — SSE, markers, filters, popups
+### Task 8: Static network data prep (stations, routes, line colors)
+
+Build-time script + committed assets. Downloads ~82 MB GTFS once; outputs stay in the repo (refresh by re-running).
+
+**Files:**
+- Create: `web/scripts/prepare-data.mjs`
+- Create (generated): `web/public/stations.json` — GeoJSON `FeatureCollection` of rail stops
+- Create (generated): `web/public/routes.json` — GeoJSON `FeatureCollection` of rail route polylines
+- Create (generated): `web/src/line-colors.ts` — `export const lineColors: Record<string, string>`
+
+**Step 1: Write the script**
+
+`web/scripts/prepare-data.mjs`:
+```js
+// One-off data prep: VBB GTFS + line colors -> committed static assets.
+// Re-run to refresh (GTFS updates 2x weekly): node web/scripts/prepare-data.mjs
+import {execSync} from 'node:child_process'
+import {mkdirSync, readFileSync, writeFileSync} from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import {fileURLToPath} from 'node:url'
+
+const here = path.dirname(fileURLToPath(import.meta.url))
+const web = path.resolve(here, '..')
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vbb-gtfs-'))
+const run = c => execSync(c, {stdio: 'inherit', cwd: tmp})
+
+// 1. download + extract GTFS
+run(`curl -sL -o vbb.zip https://unternehmen.vbb.de/gtfs`)
+run(`unzip -o -q vbb.zip -d gtfs`)
+
+// 2. download line colors
+run(`curl -sL -o linienfarben.zip https://unternehmen.vbb.de/fileadmin/user_upload/VBB/Dokumente/API-Datensaetze/linienfarben.zip`)
+run(`unzip -o -q linienfarben.zip -d linienfarben`)
+
+// ... (steps 3-6 filled below; script is refined iteratively in steps 2-4)
+```
+
+**Step 2: Inspect GTFS structure first**
+
+Run: `node -e "console.log(readFileSync('/tmp/.../gtfs/routes.txt','utf8').split('\n').slice(0,5))"` (or `head` inside the script) — identify `route_type` values used (expect `0` tram, `1` subway, `2` rail; S-Bahn distinguished from regional by `route_short_name` matching `/^S\d/` or `/^S4[12]$/` etc.).
+Expected: header + sample rows. Record the exact route_type values and the S-Bahn naming pattern in a comment in the script.
+
+**Step 3: Complete the script**
+
+Implement in `prepare-data.mjs`:
+- Parse `routes.txt` (route_id → {short_name, type}), keep rail routes: tram (type 0), subway (type 1), S-Bahn (type 2 + name matches `/^S\d/`). Regional RE/RB/IC etc. excluded.
+- Parse `trips.txt` (route_id per trip), `shapes.txt` (shape_id → ordered [lat, lon] points), `stops.txt` (stop_id → {name, lat, lon}).
+- **Routes GeoJSON:** for each rail route, take one representative trip's shape; decimate to ≤ 500 points (keep every k-th point); feature `{type: 'Feature', geometry: LineString, properties: {line, product}}`.
+- **Stations GeoJSON:** stops that appear on rail trips' stop_times (or all stops with `location_type` 0 that are referenced); feature `{type: 'Feature', geometry: Point, properties: {name}}`; dedupe by stop_id.
+- **Line colors:** parse the linienfarben CSV (column with hex values; inspect header in step 2), emit `web/src/line-colors.ts` with `lineColors` keyed by line name (e.g. `S7`, `U2`, `M10`); skip lines without hex.
+- Write the three outputs. Print summary counts.
+
+**Step 4: Run the script**
+
+Run: `node web/scripts/prepare-data.mjs`
+Expected: prints summary, e.g. `stations: ~1800 · routes: ~45 · lineColors: ~55`. Files written:
+- `web/public/stations.json`, `web/public/routes.json` — valid GeoJSON (validate: `node -e "JSON.parse(readFileSync(...))"`).
+- `web/src/line-colors.ts` — compiles.
+
+Sanity: open `routes.json` — S/U/tram lines present, no RE/RB; station count in the thousands, not tens of thousands (no bus stops).
+
+**Step 5: Commit**
+
+```bash
+git add web/scripts web/public web/src/line-colors.ts && git commit -m "feat(web): static network data (stations, routes, line colors)"
+```
+
+---
+
+### Task 9: Live map — SSE, labeled badges, layers, toggles
 
 **Files:**
 - Modify: `web/src/main.ts`
@@ -822,7 +915,8 @@ git add web/src/vehicles.ts web/src/vehicles.test.ts web/package.json && git com
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './style.css'
-import {filterVehicles, parseSnapshot, Product, Snapshot} from './vehicles.js'
+import {filterVehicles, parseSnapshot, Product, Snapshot, Vehicle} from './vehicles.js'
+import {lineColors} from './line-colors.js'
 
 const PRODUCT_COLORS: Record<Product, string> = {
   suburban: '#2e7d32',
@@ -839,55 +933,81 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map)
 
+// --- vehicle layer (line-labeled badges) ---
 const vehicleLayer = L.layerGroup().addTo(map)
-const markers = new Map<string, L.CircleMarker>()
+const markers = new Map<string, L.Marker>()
 const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
 let snapshot: Snapshot | null = null
 
-// --- status bar ---
-const statusEl = document.getElementById('statusbar')!
-function updateStatus(conn: 'live' | 'stale' | 'offline') {
-  const ago = snapshot && snapshot.updatedAt ? Math.round((Date.now() - snapshot.updatedAt) / 1000) : 0
-  const count = snapshot ? filterVehicles(snapshot.vehicles, filters).length : 0
-  statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago`
+function badgeHtml(v: Vehicle): string {
+  const color = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
+  return `<div class="veh" style="background:${color}">${v.line}</div>`
 }
-setInterval(() => snapshot && updateStatus(snapshot.stale ? 'stale' : 'live'), 1000)
 
-// --- render loop ---
-function render(s: Snapshot) {
-  snapshot = s
-  const visible = filterVehicles(s.vehicles, filters)
+function renderVehicles() {
+  if (!snapshot) return
+  const visible = filterVehicles(snapshot.vehicles, filters)
   const seen = new Set<string>()
   for (const v of visible) {
     seen.add(v.id)
     let m = markers.get(v.id)
     if (!m) {
-      m = L.circleMarker([v.lat, v.lon], {
-        radius: 6, color: '#fff', weight: 1.5, fillColor: PRODUCT_COLORS[v.product], fillOpacity: 0.95
+      m = L.marker([v.lat, v.lon], {
+        icon: L.divIcon({className: 'veh-icon', html: badgeHtml(v), iconSize: undefined})
       }).bindPopup('')
       m.addTo(vehicleLayer)
       markers.set(v.id, m)
     }
     m.setLatLng([v.lat, v.lon])
-    m.setStyle({fillColor: PRODUCT_COLORS[v.product]})
+    const color = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
+    m.setIcon(L.divIcon({className: 'veh-icon', html: `<div class="veh" style="background:${color}">${v.line}</div>`}))
     m.setPopupContent(
       `<b>${v.line}</b> ${PRODUCT_LABELS[v.product]}<br>→ ${v.direction}<br>next: ${v.nextStop ?? '—'}` +
       (v.delayMs != null ? `<br><span style="color:${v.delayMs >= 300000 ? '#c62828' : '#333'}">delay: ${Math.round(v.delayMs / 60000)} min</span>` : '')
     )
   }
   for (const [id, m] of markers) {
-    if (!seen.has(id)) {
-      m.remove()
-      markers.delete(id)
-    }
+    if (!seen.has(id)) { m.remove(); markers.delete(id) }
   }
-  updateStatus(s.stale ? 'stale' : 'live')
+  updateStatus(snapshot.stale ? 'stale' : 'live')
 }
+
+// --- station + route layers ---
+const stationLayer = L.layerGroup()
+const routeLayer = L.layerGroup()
+async function loadNetworkLayers() {
+  try {
+    const stations = await (await fetch('/stations.json')).json()
+    L.geoJSON(stations, {
+      pointToLayer: (_f, latlng) => L.circleMarker(latlng, {radius: 3, color: '#555', weight: 1, fillColor: '#888', fillOpacity: 0.8}),
+      onEachFeature: (f, layer) => f.properties?.name && layer.bindPopup(f.properties.name)
+    }).addTo(stationLayer)
+  } catch (err) { console.warn('stations layer unavailable', err) }
+  try {
+    const routes = await (await fetch('/routes.json')).json()
+    L.geoJSON(routes, {
+      style: f => ({color: lineColors[f.properties?.line] ?? PRODUCT_COLORS[f.properties?.product] ?? '#888', weight: 2, opacity: 0.75})
+    }).addTo(routeLayer)
+  } catch (err) { console.warn('routes layer unavailable', err) }
+}
+loadNetworkLayers()
+
+// --- status bar ---
+const statusEl = document.getElementById('statusbar')!
+function updateStatus(conn: 'live' | 'stale' | 'offline') {
+  const ago = snapshot?.updatedAt ? Math.round((Date.now() - snapshot.updatedAt) / 1000) : 0
+  const count = snapshot ? filterVehicles(snapshot.vehicles, filters).length : 0
+  statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago`
+}
+setInterval(() => snapshot && updateStatus(snapshot.stale ? 'stale' : 'live'), 1000)
 
 // --- SSE ---
 function connect() {
   const es = new EventSource('/api/vehicles/stream')
-  es.addEventListener('snapshot', e => render(parseSnapshot((e as MessageEvent).data)))
+  es.addEventListener('snapshot', e => {
+    snapshot = parseSnapshot((e as MessageEvent).data)
+    renderVehicles()
+  })
   es.onerror = () => {
     es.close()
     updateStatus('offline')
@@ -896,8 +1016,10 @@ function connect() {
 }
 connect()
 
-// --- filters ---
+// --- mode filters + layer toggles ---
 const filterEl = document.getElementById('filters')!
+const modeRow = document.createElement('div')
+modeRow.className = 'mode'
 ;(Object.keys(PRODUCT_LABELS) as Product[]).forEach(p => {
   const label = document.createElement('label')
   const cb = document.createElement('input')
@@ -905,11 +1027,35 @@ const filterEl = document.getElementById('filters')!
   cb.checked = true
   cb.onchange = () => {
     filters[p] = cb.checked
-    if (snapshot) render(snapshot)
+    renderVehicles()
   }
   label.append(cb, ` ${PRODUCT_LABELS[p]}`, ` <span style="color:${PRODUCT_COLORS[p]}">●</span>`)
-  filterEl.append(label)
+  modeRow.append(label)
 })
+filterEl.append(modeRow)
+
+const toggleLayer = (name: string, layer: L.LayerGroup) => {
+  const label = document.createElement('label')
+  label.className = 'layer'
+  const cb = document.createElement('input')
+  cb.type = 'checkbox'
+  cb.checked = false
+  cb.onchange = () => cb.checked ? layer.addTo(map) : layer.remove()
+  label.append(cb, ` ${name}`)
+  filterEl.append(label)
+}
+toggleLayer('Stations', stationLayer)
+toggleLayer('Routes', routeLayer)
+```
+
+Add to `web/src/style.css` (vehicle badge styles):
+```css
+.veh-icon { border: none; background: none; }
+.veh {
+  min-width: 24px; height: 20px; padding: 0 4px; border-radius: 10px;
+  color: #fff; font: 700 11px/20px system-ui; text-align: center;
+  border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.5);
+}
 ```
 
 **Step 2: End-to-end smoke (both workspaces)**
@@ -921,21 +1067,23 @@ Expected: server logs "listening on :3211".
 **Step 3: Browser verification** (@verification-before-completion, @frontend-design)
 
 Drive `http://localhost:3211` with the browser tool:
-- Map shows Berlin with OSM tiles.
-- Green/blue/red markers appear and move between snapshots (wait ≥ 20 s for second poll; positions change).
-- Unchecking U-Bahn removes blue markers and updates count.
-- Click a marker → popup shows line, direction, next stop, delay.
+- Map shows Berlin with OSM tiles; colored line badges (S7, U2, M10…) appear and move between snapshots (wait ≥ 20 s for second poll).
+- Badge colors match VBB line colors (spot-check a few against `line-colors.ts`).
+- Unchecking U-Bahn removes blue badges and updates count.
+- Enabling "Stations" shows stop dots; enabling "Routes" shows line polylines.
+- Click a badge → popup shows line, direction, next stop, delay.
 - Status bar shows `live · N vehicles · updated Ns ago`.
+- Narrow viewport: filters bar at bottom, map still usable.
 
 **Step 4: Commit**
 
 ```bash
-git add web/src/main.ts && git commit -m "feat(web): live vehicle map with SSE, filters, popups"
+git add web/src/main.ts web/src/style.css && git commit -m "feat(web): live map with badges, station/route layers, toggles"
 ```
 
 ---
 
-### Task 9: Container + deployment config
+### Task 10: Container + deployment config
 
 **Files:**
 - Create: `Dockerfile`
@@ -979,7 +1127,7 @@ dist
 **Step 2: Local container smoke**
 
 Run: `docker build -t liveberlin . && docker run -d -p 3000:3000 --name lb-test liveberlin`
-Then: `curl -s localhost:3000/healthz` → `{"ok":true,...}`; `curl -s localhost:3000/` → HTML containing `id="map"`.
+Then: `curl -s localhost:3000/healthz` → `{"ok":true,...}`; `curl -s localhost:3000/` → HTML containing `id="map"`; `curl -s localhost:3000/stations.json` → GeoJSON.
 Then: `docker rm -f lb-test`
 
 **Step 3: Deploy (platform of choice — requires user account)**
@@ -996,21 +1144,23 @@ git add Dockerfile .dockerignore && git commit -m "chore: docker image and deplo
 
 ---
 
-### Task 10: Final verification
+### Task 11: Final verification
 
 Run: `npm test` (root, both workspaces) — all PASS.
 Run: `npm run typecheck --workspace=server` — clean.
 Run: `npm run build --workspace=web` — clean.
-Browser smoke on the built app (local server) — markers, filters, popups, status bar all working.
+Browser smoke on the built app (local server) — badges, filters, station/route toggles, popups, status bar all working.
 Confirm attribution footer visible.
 
 Expected final tree:
 ```
 server/src/{vehicle,poller,upstream,sse,server}.ts (+ .test.ts)
-web/src/{main.ts,vehicles.ts,vehicles.test.ts,style.css}
+web/src/{main.ts,vehicles.ts,vehicles.test.ts,style.css,line-colors.ts}
+web/public/{stations.json,routes.json}
+web/scripts/prepare-data.mjs
 Dockerfile
 ```
 
 Commit any stragglers: `git add -A && git commit -m "chore: final verification"` (only if changes).
 
-**Done.** End-to-end behavior: open URL → live map of Berlin rail vehicles, updating every ~20 s, filters + popups + status.
+**Done.** End-to-end behavior: open URL → live map of Berlin rail vehicles with line-labeled badges, moving every ~20 s via server push, plus station/route layers and mode filters. Mobile-friendly.
