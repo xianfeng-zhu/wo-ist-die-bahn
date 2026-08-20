@@ -12,7 +12,12 @@ const MAX_BACKOFF_MS = 60000
 const PRODUCT_COLORS: Record<Product, string> = {suburban: '#2e7d32', subway: '#1565c0', tram: '#c62828'}
 const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram'}
 
-const map = L.map('map').setView([52.52, 13.405], 12)
+const mapOptions: L.MapOptions & {smoothWheelZoom?: boolean} = {
+  smoothWheelZoom: true,
+  zoomSnap: 0,
+  wheelPxPerZoomLevel: 60
+}
+const map = L.map('map', mapOptions).setView([52.52, 13.405], 12)
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
