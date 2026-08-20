@@ -18,10 +18,29 @@ const map = L.map('map', {
   zoomSnap: 0
 }).setView([52.52, 13.405], 12)
 enableSmoothWheelZoom(map)
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map)
+// During continuous fractional zoom (see wheel-zoom.ts), Leaflet fires `zoom`
+// on every fractional step; the tile layer's `_resetView` then wipes and
+// re-fetches all tiles each time, which shows as white flashing while
+// scrolling. Keep the tiles and let Leaflet scale them to the fractional
+// zoom; only reset the grid when the integer tile level actually changes.
+// (Monkeypatch of a private API — cast is deliberate, see ts-no-any.)
+const tileInternals = tileLayer as unknown as {
+  _tileZoom?: number
+  _setZoomTransforms(center: L.LatLng, zoom: number): void
+  _setView(center: L.LatLng, zoom: number, noPrune?: boolean, noUpdate?: boolean): void
+}
+const origTileSetView = tileInternals._setView.bind(tileLayer)
+tileInternals._setView = (center, zoom, noPrune, noUpdate) => {
+  if (!noUpdate && Math.round(zoom) === tileInternals._tileZoom) {
+    tileInternals._setZoomTransforms(center, zoom)
+    return
+  }
+  origTileSetView(center, zoom, noPrune, noUpdate)
+}
 
 const vehicleLayer = L.layerGroup().addTo(map)
 const markers = new Map<string, L.Marker>()
