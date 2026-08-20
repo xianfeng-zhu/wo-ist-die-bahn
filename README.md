@@ -10,7 +10,7 @@ npm run build          # -> dist/
 ## Deploy (static host)
 - Cloudflare Pages: build command `npm run build`, output `dist`
 - Netlify: build `npm run build`, publish `dist`
-- GitHub Pages: any static publish of `dist/`
+- GitHub Pages: works for root-served pages (user/org page or custom domain); for project pages set `base: "/<repo>/"` in vite.config.ts.
 
 ## Data
 Live positions: VBB HAFAS (`fahrinfo.vbb.de/gate`). Network data: VBB GTFS + linienfarben (CC BY 4.0). Map: © OpenStreetMap contributors.

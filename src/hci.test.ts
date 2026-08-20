@@ -1,5 +1,14 @@
 import {describe, expect, it} from 'vitest'
-import {buildRadarBody, parseRadar} from './hci.js'
+import {berlinDateTime, buildRadarBody, parseRadar} from './hci.js'
+
+describe('berlinDateTime', () => {
+  it('converts a UTC instant to Europe/Berlin wall-clock (summer, UTC+2)', () => {
+    expect(berlinDateTime(new Date('2026-08-20T23:30:00Z'))).toEqual({date: '20260821', time: '013000'})
+  })
+  it('converts a UTC instant to Europe/Berlin wall-clock (winter, UTC+1)', () => {
+    expect(berlinDateTime(new Date('2026-01-15T22:30:00Z'))).toEqual({date: '20260115', time: '233000'})
+  })
+})
 
 describe('buildRadarBody', () => {
   it('builds a JourneyGeoPos request with rail-only filter', () => {

@@ -5,6 +5,27 @@ const RAIL_MASK = 7 // S=1, U=2, tram=4
 
 export interface BBox {north: number; south: number; west: number; east: number}
 
+const BERLIN_FMT = new Intl.DateTimeFormat('de-DE', {
+  timeZone: 'Europe/Berlin',
+  hourCycle: 'h23',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit'
+})
+
+export function berlinDateTime(now: Date): {date: string; time: string} {
+  const parts = BERLIN_FMT.formatToParts(now)
+  const p: Record<string, string> = {}
+  for (const part of parts) p[part.type] = part.value
+  return {
+    date: `${p.year}${p.month}${p.day}`,
+    time: `${p.hour}${p.minute}${p.second}`
+  }
+}
+
 export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: number) {
   return {
     lang: 'de',
@@ -35,7 +56,7 @@ export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: n
 export function parseRadar(json: any, nowTime: string): Vehicle[] {
   const svc = json?.svcResL?.[0]
   if (!svc || svc.err !== 'OK') throw new Error(`HAFAS error: ${svc?.err ?? 'no svcResL'}`)
-  const res = svc.res
+  const res = svc.res ?? {}
   const common = {
     locs: res.common?.locL ?? [],
     prods: res.common?.prodL ?? []
@@ -46,10 +67,7 @@ export function parseRadar(json: any, nowTime: string): Vehicle[] {
 }
 
 export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal): Promise<Vehicle[]> {
-  const now = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
-  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const {date, time} = berlinDateTime(new Date())
   const res = await fetch(`${GATE_URL}?rnd=${Date.now()}`, {
     method: 'POST',
     headers: {'content-type': 'application/json'},

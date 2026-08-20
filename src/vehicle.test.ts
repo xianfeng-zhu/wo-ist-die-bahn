@@ -30,6 +30,9 @@ describe('delayFrom', () => {
   it('returns null without realtime data', () => {
     expect(delayFrom({dTimeS: '23:09:00'})).toBeNull()
   })
+  it('returns null when a time string is malformed', () => {
+    expect(delayFrom({dTimeS: 'xxyyzz', dTimeR: '230500'})).toBeNull()
+  })
 })
 
 describe('transformJourney', () => {

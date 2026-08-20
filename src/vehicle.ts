@@ -31,7 +31,7 @@ export function delayFrom(stop: StopoverLike): number | null {
       let diff = (toSec(stop[r]) - toSec(stop[s])) / 60 * 60000
       if (diff > 12 * 3600 * 1000) diff -= 24 * 3600 * 1000
       if (diff < -12 * 3600 * 1000) diff += 24 * 3600 * 1000
-      return Math.round(diff)
+      return Number.isFinite(diff) ? Math.round(diff) : null
     }
   }
   return null
