@@ -217,12 +217,7 @@ try {
     `}`
   ].join('\n') + '\n'
 
-  mkdirSync('public', {recursive: true})
-  writeFileSync(path.join('public', 'stations.json'), JSON.stringify(stationsJson))
-  writeFileSync(path.join('public', 'routes.json'), JSON.stringify(routesJson))
-  writeFileSync(path.join('src', 'line-colors.ts'), colorsTs)
-
-  // ---- sanity gates ----
+  // ---- sanity gates (BEFORE any write: never overwrite committed assets with bad data) ----
   const lineNames = routeFeatures.map(f => f.properties.line)
   const bad = lineNames.filter(n => /^(RE|RB|FEX|ICE)/.test(n))
   const tramLines = lineNames.filter(n => lineBest.get(n).product === 'tram')
@@ -237,9 +232,13 @@ try {
   ]
   for (const [label, ok] of checks) console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`)
   if (checks.some(([, ok]) => !ok)) {
-    console.error('sanity gates failed — not writing was skipped, fix inputs/filter')
+    console.error('sanity gates failed — outputs were not written, fix inputs/filter')
     process.exitCode = 1
   } else {
+    mkdirSync('public', {recursive: true})
+    writeFileSync(path.join('public', 'stations.json'), JSON.stringify(stationsJson))
+    writeFileSync(path.join('public', 'routes.json'), JSON.stringify(routesJson))
+    writeFileSync(path.join('src', 'line-colors.ts'), colorsTs)
     console.log(`stations: ${stationFeatures.length} · routes: ${routeFeatures.length} · lineColors: ${colorEntries.length}`)
     console.log('sample lines:', lineNames.filter(n => ['S41', 'S42', 'U1', 'U9', 'M1', 'M10', '12'].includes(n)).join(', '))
   }
