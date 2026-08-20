@@ -53,8 +53,24 @@ export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: n
   }
 }
 
-export function parseRadar(json: any, nowTime: string): Vehicle[] {
-  const svc = json?.svcResL?.[0]
+// Minimal shape of the HCI response we consume (network JSON; validated by
+// usage + unit tests). Cast is unchecked by design: the wire format is fixed
+// by the HAFAS protocol and covered by parseRadar tests.
+interface RadarResponse {
+  svcResL?: Array<{
+    err?: string
+    res?: {
+      common?: {
+        locL?: Array<{name?: string}>
+        prodL?: Array<{name?: string; cls?: number}>
+      }
+      jnyL?: Journey[]
+    }
+  }>
+}
+
+export function parseRadar(json: unknown, nowTime: string): Vehicle[] {
+  const svc = (json as RadarResponse).svcResL?.[0]
   if (!svc || svc.err !== 'OK') throw new Error(`HAFAS error: ${svc?.err ?? 'no svcResL'}`)
   const res = svc.res ?? {}
   const common = {
