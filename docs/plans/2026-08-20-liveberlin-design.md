@@ -22,6 +22,8 @@ A public web app showing real-time positions of Berlin S-Bahn, U-Bahn, and tram 
 - Some radar positions are interpolated from schedule/prognosis, not raw GPS. Visually smooth; may be slightly off on long inter-stop gaps.
 - No CORS on mgate → browser cannot call HAFAS directly → backend proxy required.
 
+**Webapp inspection (browser, 2026-08-20):** `vbb.de/en/vbb-travel-info/` is a TYPO3 landing page linking to the real app at `fahrinfo.vbb.de/webapp/` — a HaCon HAFAS webapp (Leaflet + OSM tiles). Its "Live map & Multi-mobility" view shows **stations, routes, multi-mobility (rental) locations, and traffic messages only — no live vehicle positions**. Data flows over `fahrinfo.vbb.de/gate` (HCI JSON, `ver 1.77`, AID `hafas-vbb-webapp`, client `VBB WebApp / vs_webapp_vbb`) — the same HAFAS backend and same auth/client IDs that the `hafas-client` vbb profile uses (base.json verified earlier). Implication: VBB's public site does not expose a moving-vehicle map; `radar` is the mechanism that would power one, and it is verified working (778 movements in Berlin bbox).
+
 ## Architecture
 
 Single-process TypeScript app. npm workspaces monorepo; one Docker container deploys everything.
