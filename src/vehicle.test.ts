@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest'
-import {delayFrom, productFromCls, transformJourney} from './vehicle.js'
+import type {Product} from './vehicle.js'
+import {delayFrom, filterVehicles, productFromCls, transformJourney} from './vehicle.js'
 
 describe('productFromCls', () => {
   it('maps HAFAS cls bitmask to rail products', () => {
@@ -93,5 +94,13 @@ describe('transformJourney', () => {
     const v = transformJourney(compactJ, {locs: compactLocs, prods: [{name: 'S9', cls: 1}]}, '230330')!
     expect(v.nextStop).toBe('S Ostkreuz Bhf (Berlin)')
     expect(v.delayMs).toBe(-180000)
+  })
+})
+
+describe('filterVehicles', () => {
+  const v = (product: Product) => ({id: product, line: 'L', product, direction: 'd', lat: 1, lon: 2, nextStop: null, delayMs: null})
+  it('keeps only enabled products', () => {
+    const out = filterVehicles([v('suburban'), v('subway'), v('tram')], {suburban: true, subway: false, tram: true})
+    expect(out.map(x => x.product)).toEqual(['suburban', 'tram'])
   })
 })

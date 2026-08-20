@@ -13,6 +13,12 @@ export interface Vehicle {
 
 export const PRODUCT_BY_CLS: Record<number, Product> = {1: 'suburban', 2: 'subway', 4: 'tram'}
 
+export type Filters = Record<Product, boolean>
+
+export function filterVehicles(vehicles: Vehicle[], filters: Filters): Vehicle[] {
+  return vehicles.filter(v => filters[v.product])
+}
+
 export function productFromCls(cls: number | undefined): Product | null {
   return cls != null ? PRODUCT_BY_CLS[cls] ?? null : null
 }

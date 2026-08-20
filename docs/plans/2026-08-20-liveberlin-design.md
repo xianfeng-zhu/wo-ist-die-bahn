@@ -33,13 +33,13 @@ A public web app showing real-time positions of Berlin S-Bahn, U-Bahn, and tram 
 
 ## Architecture (frontend-direct, per user decision)
 
-Pure static SPA. No backend. Vite + vanilla TS + Leaflet. Deployed to any static host (Cloudflare Pages / Netlify / GitHub Pages / Vercel).
+Pure static SPA. No backend. Vite + vanilla TS + MapLibre GL. Deployed to any static host (Cloudflare Pages / Netlify / GitHub Pages / Vercel).
 
 ```
 Browser (Vite SPA)
   └─ HCI client (hand-rolled): POST JourneyGeoPos to fahrinfo.vbb.de/gate every 20 s
        → parse svcResL (locL/prodL refs, j.pos)
-       → Vehicle[] → render badges on Leaflet
+       → Vehicle[] → render badges on MapLibre GL
   └─ static assets: stations.json, routes.json, line-colors.ts (from VBB GTFS + linienfarben)
 ```
 
@@ -53,7 +53,7 @@ Browser (Vite SPA)
 
 - **HCI client** — `buildRadarBody(bbox, {maxJny})` (pure, TDD), `parseRadar(json)` (pure, TDD, fixtures from real captures), `fetchVehicles()` (fetch wrapper with timeout + error surface).
 - **Vehicle transform** — `{id: jid, line: prod.name, product: cls→suburban|subway|tram, direction: dirTxt, lat/lon: pos, nextStop: first upcoming stopL locX→name, delayMs: realtime−scheduled}`.
-- **Map** — Leaflet + OSM tiles, centered Berlin; mobile-friendly.
+- **Map** — MapLibre GL + OSM raster tiles, centered Berlin; mobile-friendly.
 - **Vehicle layer** — line-labeled badges ("S7", "U2", "M10") in official line colors (`line-colors.ts` from VBB `linienfarben`), mode-color fallback. Click → popup: line, direction, next stop, delay badge (red if ≥ 5 min).
 - **Station layer** (toggle) — rail stops from GTFS `stops.txt`, dots, name popup.
 - **Route layer** (toggle) — rail route polylines from GTFS `shapes.txt`, colored by line.
@@ -97,6 +97,6 @@ Bus display, historical tracking, vehicle-follow mode, auth, server-side caching
 
 1. Frontend-direct static SPA over server proxy — per user decision; risks documented above, fallback path (tiny proxy) exists if VBB blocks.
 2. Hand-rolled HCI client over `hafas-client` — hafas-client cannot bundle in browser.
-3. TS + Vite + Leaflet + vitest — user-approved stack, boring components.
+3. TS + Vite + MapLibre GL + vitest — user-approved stack, boring components.
 4. S/U/tram only — buses excluded (mask 7 filters server-side of our request).
 5. Public web app — static hosting, zero-infra.
