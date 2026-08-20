@@ -34,6 +34,7 @@ const tileInternals = tileLayer as unknown as {
   _invalidateAll(): void
   _onMoveEnd(): void
   _update(center?: L.LatLng): void
+  _updateLevels(): void
   _setZoomTransforms(center: L.LatLng, zoom: number): void
   _setView(center: L.LatLng, zoom: number, noPrune?: boolean, noUpdate?: boolean): void
 }
@@ -51,6 +52,17 @@ tileInternals._invalidateAll = () => {
   if (zoomGestureActive) return
   origInvalidateAll()
 }
+// The layer's `viewprereset` handler was registered on the MAP at add-time
+// (`map.on(getEvents(), layer)`), capturing the original prototype
+// `_invalidateAll` — which wipes every tile. Instance patches can't reach
+// that captured reference, and `off` needs the exact fn to remove it.
+// (Unchecked cast: Leaflet's own private API shape.)
+const protoInvalidateAll = (Object.getPrototypeOf(tileLayer) as {_invalidateAll(): void})._invalidateAll
+map.off('viewprereset', protoInvalidateAll, tileLayer)
+map.on('viewprereset', () => {
+  if (zoomGestureActive) return
+  protoInvalidateAll.call(tileLayer)
+})
 tileInternals._setView = (center, zoom, noPrune, noUpdate) => {
   if (!noUpdate && (zoomGestureActive || Math.round(zoom) === tileInternals._tileZoom)) {
     tileInternals._setZoomTransforms(center, zoom)
@@ -67,8 +79,16 @@ tileInternals._update = (center) => {
   origTileUpdate(center)
 }
 const refreshTiles = (): void => {
-  if (Math.round(map.getZoom()) === tileInternals._tileZoom) return // already settled
-  origTileSetView(map.getCenter(), map.getZoom(), false, undefined)
+  // OpenLayers-style non-destructive settle: load the new integer zoom
+  // level's tiles WITHOUT clearing the current ones (no `_abortLoading`, no
+  // `_resetGrid` wipe) — old tiles stay visible while the new level loads,
+  // so the settle never flashes white. Old tiles are retained by Leaflet's
+  // own parent-tile pruning and pruned on the next regular update.
+  const rounded = Math.round(map.getZoom())
+  if (rounded === tileInternals._tileZoom) return // already settled
+  tileInternals._tileZoom = rounded
+  tileInternals._updateLevels()
+  tileInternals._update(map.getCenter())
 }
 enableSmoothWheelZoom(map, {
   onGestureStart: () => {
