@@ -21,6 +21,12 @@ describe('delayFrom', () => {
   it('handles midnight wrap-around', () => {
     expect(delayFrom({dTimeS: '23:59:00', dTimeR: '00:03:00'})).toBe(240000)
   })
+  it('computes delay from compact HAFAS departure times (HHMMSS)', () => {
+    expect(delayFrom({dTimeS: '230300', dTimeR: '230500'})).toBe(120000)
+  })
+  it('computes delay from compact HAFAS arrival times (HHMMSS)', () => {
+    expect(delayFrom({aTimeS: '230900', aTimeR: '230600'})).toBe(-180000)
+  })
   it('returns null without realtime data', () => {
     expect(delayFrom({dTimeS: '23:09:00'})).toBeNull()
   })
@@ -63,5 +69,26 @@ describe('transformJourney', () => {
   it('picks the first upcoming stop as nextStop', () => {
     const v = transformJourney(j, {locs, prods: [{name: 'S9', cls: 1}]}, '23:03:30')!
     expect(v.nextStop).toBe('S Treptower Park')
+  })
+  it('selects the upcoming stop with compact HAFAS times (HHMMSS)', () => {
+    const compactLocs = [
+      {name: 'S Schöneweide Bhf (Berlin)'},
+      {name: 'S Treptower Park'},
+      {name: 'S Ostkreuz Bhf (Berlin)'}
+    ]
+    const compactJ = {
+      jid: '1|98495|0|86|20082026',
+      prodX: 0,
+      dirTxt: 'S Ostkreuz (Berlin)',
+      pos: {x: 13495123, y: 52467625},
+      stopL: [
+        {locX: 0, dTimeS: '230300'},
+        {locX: 1, dTimeS: '230315'},
+        {locX: 2, aTimeS: '230900', aTimeR: '230600', dTimeS: '230900', dTimeR: '230600'}
+      ]
+    }
+    const v = transformJourney(compactJ, {locs: compactLocs, prods: [{name: 'S9', cls: 1}]}, '230330')!
+    expect(v.nextStop).toBe('S Ostkreuz Bhf (Berlin)')
+    expect(v.delayMs).toBe(-180000)
   })
 })

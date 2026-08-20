@@ -18,8 +18,11 @@ export function productFromCls(cls: number | undefined): Product | null {
 }
 
 const toSec = (s: string): number => {
-  const [h, m, sec] = s.split(':').map(Number)
-  return h * 3600 + m * 60 + (sec ?? 0)
+  const digits = s.replace(/:/g, '').padStart(6, '0')
+  const h = Number(digits.slice(0, 2))
+  const m = Number(digits.slice(2, 4))
+  const sec = Number(digits.slice(4, 6))
+  return h * 3600 + m * 60 + sec
 }
 
 export function delayFrom(stop: StopoverLike): number | null {
