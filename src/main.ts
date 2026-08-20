@@ -17,30 +17,68 @@ const map = L.map('map', {
   scrollWheelZoom: false, // replaced by enableSmoothWheelZoom below
   zoomSnap: 0
 }).setView([52.52, 13.405], 12)
-enableSmoothWheelZoom(map)
 const tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map)
 // During continuous fractional zoom (see wheel-zoom.ts), Leaflet fires `zoom`
 // on every fractional step; the tile layer's `_resetView` then wipes and
-// re-fetches all tiles each time, which shows as white flashing while
-// scrolling. Keep the tiles and let Leaflet scale them to the fractional
-// zoom; only reset the grid when the integer tile level actually changes.
-// (Monkeypatch of a private API — cast is deliberate, see ts-no-any.)
+// re-fetches all tiles, which shows as white flashing while scrolling. Keep
+// the tiles (Leaflet scales them to the fractional zoom) for the whole
+// gesture — including integer-level crossings and the fling glide — and
+// refresh once when the gesture ends. (Monkeypatch of a private API — cast
+// is deliberate, see ts-no-any.)
+let zoomGestureActive = false
 const tileInternals = tileLayer as unknown as {
   _tileZoom?: number
+  _invalidateAll(): void
+  _onMoveEnd(): void
+  _update(center?: L.LatLng): void
   _setZoomTransforms(center: L.LatLng, zoom: number): void
   _setView(center: L.LatLng, zoom: number, noPrune?: boolean, noUpdate?: boolean): void
 }
+const origInvalidateAll = tileInternals._invalidateAll.bind(tileLayer)
 const origTileSetView = tileInternals._setView.bind(tileLayer)
+const origTileOnMoveEnd = tileInternals._onMoveEnd.bind(tileLayer)
+const origTileUpdate = tileInternals._update.bind(tileLayer)
+// During a zoom gesture Leaflet fires `viewprereset`/`viewreset`/`moveend` on
+// every (fractional) zoom step; each can wipe and re-fetch tiles
+// (`_invalidateAll`, `_setView` → `_resetGrid`, `_update` → `_pruneTiles`),
+// which shows as white flashing while scrolling. Keep the tiles and let
+// Leaflet scale them to the fractional zoom; refresh once at gesture end.
+// (Monkeypatch of a private API — casts are deliberate, see ts-no-any.)
+tileInternals._invalidateAll = () => {
+  if (zoomGestureActive) return
+  origInvalidateAll()
+}
 tileInternals._setView = (center, zoom, noPrune, noUpdate) => {
-  if (!noUpdate && Math.round(zoom) === tileInternals._tileZoom) {
+  if (!noUpdate && (zoomGestureActive || Math.round(zoom) === tileInternals._tileZoom)) {
     tileInternals._setZoomTransforms(center, zoom)
     return
   }
   origTileSetView(center, zoom, noPrune, noUpdate)
 }
+tileInternals._onMoveEnd = () => {
+  if (zoomGestureActive) return
+  origTileOnMoveEnd()
+}
+tileInternals._update = (center) => {
+  if (zoomGestureActive) return
+  origTileUpdate(center)
+}
+const refreshTiles = (): void => {
+  if (Math.round(map.getZoom()) === tileInternals._tileZoom) return // already settled
+  origTileSetView(map.getCenter(), map.getZoom(), false, undefined)
+}
+enableSmoothWheelZoom(map, {
+  onGestureStart: () => {
+    zoomGestureActive = true
+  },
+  onGestureEnd: () => {
+    zoomGestureActive = false
+    refreshTiles()
+  }
+})
 
 const vehicleLayer = L.layerGroup().addTo(map)
 const markers = new Map<string, L.Marker>()

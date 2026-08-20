@@ -33,11 +33,16 @@ const LINE_DELTA_MULTIPLIER = 40 // OpenLayers / MapLibre DOM_DELTA_LINE
 const PAGE_DELTA_MULTIPLIER = 300 // OpenLayers DOM_DELTA_PAGE
 
 // fling (inertia) tuning
-const FLING_DETECT_MS = 60 // input gap after which the gesture counts as ended
+const FLING_DETECT_MS = 60 // input gap after which the fling glide starts
 const GLIDE_STEP_MS = 16
 const GLIDE_DECAY_MS = 150 // exponential velocity decay constant
 const GLIDE_MAX_MS = 600 // hard cap so the glide always terminates
 const GLIDE_MIN_VELOCITY = 0.0002 // zoom/ms; stop gliding below this
+// a gesture only ends after this quiet period without input (matches the
+// 400ms new-gesture threshold), or shortly after the fling glide finishes —
+// a premature end mid-scroll would re-enable per-step tile wipes
+const GESTURE_END_MS = 400
+const GLIDE_END_CONFIRM_MS = 100
 
 export type WheelType = 'wheel' | 'trackpad' | null
 
@@ -63,13 +68,20 @@ export function classifyWheel(prev: WheelType, value: number, timeDelta: number)
   return prev
 }
 
+export interface WheelZoomOptions {
+  /** Fired when a new scroll gesture starts (first event after a pause). */
+  onGestureStart?: () => void
+  /** Fired when the gesture fully ends (after the fling glide, if any). */
+  onGestureEnd?: () => void
+}
+
 /**
  * Replace the map's wheel zoom with Google-Maps-style behavior: 1:1 trackpad
  * tracking at the cursor, per-event scale cap, and a fling glide after the
  * gesture ends (decaying velocity, like Google Maps). Shift = precision zoom;
  * Ctrl (browser pinch-zoom) passes through untouched. Returns a disposer.
  */
-export function enableSmoothWheelZoom(map: L.Map): () => void {
+export function enableSmoothWheelZoom(map: L.Map, opts: WheelZoomOptions = {}): () => void {
   const container = map.getContainer()
 
   let type: WheelType = null
@@ -79,7 +91,29 @@ export function enableSmoothWheelZoom(map: L.Map): () => void {
   let velocity = 0 // smoothed zoom/ms for the fling
   let glideTimer: ReturnType<typeof setTimeout> | null = null
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
+  let endTimer: ReturnType<typeof setTimeout> | null = null
   let lastAnchor = map.latLngToContainerPoint(map.getCenter())
+  let gestureActive = false
+
+  const endGesture = (): void => {
+    if (endTimer !== null) {
+      clearTimeout(endTimer)
+      endTimer = null
+    }
+    if (gestureActive) {
+      gestureActive = false
+      opts.onGestureEnd?.()
+    }
+  }
+
+  /** End the gesture after a quiet period; any new input cancels it. */
+  const scheduleEnd = (delay: number): void => {
+    if (endTimer !== null) clearTimeout(endTimer)
+    endTimer = setTimeout(() => {
+      endTimer = null
+      endGesture()
+    }, delay)
+  }
 
   const applyZoom = (dZoom: number): void => {
     const zoom = map.getZoom() + dZoom
@@ -88,12 +122,19 @@ export function enableSmoothWheelZoom(map: L.Map): () => void {
   }
 
   const startGlide = (): void => {
-    if (Math.abs(velocity) < GLIDE_MIN_VELOCITY) return
+    if (Math.abs(velocity) < GLIDE_MIN_VELOCITY) {
+      // no fling: confirm the gesture really ended with a quiet period
+      scheduleEnd(GESTURE_END_MS)
+      return
+    }
     const start = performance.now()
     const step = (): void => {
       const t = performance.now() - start
       const v = velocity * Math.exp(-t / GLIDE_DECAY_MS)
-      if (Math.abs(v) < GLIDE_MIN_VELOCITY || t >= GLIDE_MAX_MS) return
+      if (Math.abs(v) < GLIDE_MIN_VELOCITY || t >= GLIDE_MAX_MS) {
+        scheduleEnd(GLIDE_END_CONFIRM_MS)
+        return
+      }
       applyZoom(v * GLIDE_STEP_MS)
       glideTimer = setTimeout(step, GLIDE_STEP_MS)
     }
@@ -115,8 +156,9 @@ export function enableSmoothWheelZoom(map: L.Map): () => void {
     lastEventTime = now
 
     // if no more input arrives within FLING_DETECT_MS, glide with the
-    // remaining velocity (fling / inertia)
+    // remaining velocity (fling / inertia); new input cancels the end timer
     if (glideTimer !== null) clearTimeout(glideTimer)
+    if (endTimer !== null) clearTimeout(endTimer)
     glideTimer = setTimeout(startGlide, FLING_DETECT_MS)
   }
 
@@ -135,6 +177,8 @@ export function enableSmoothWheelZoom(map: L.Map): () => void {
       // new gesture: unambiguous values classify directly; ambiguous ones
       // wait 40ms for a repeat (trackpad stream) else resolve as a single
       // wheel notch (MapLibre `_onTimeout`)
+      gestureActive = true
+      opts.onGestureStart?.()
       const first = classifyWheel(null, value, timeDelta)
       if (first !== null) {
         type = first
@@ -174,5 +218,7 @@ export function enableSmoothWheelZoom(map: L.Map): () => void {
     container.removeEventListener('wheel', onWheel)
     if (glideTimer !== null) clearTimeout(glideTimer)
     if (pendingTimer !== null) clearTimeout(pendingTimer)
+    if (endTimer !== null) clearTimeout(endTimer)
+    endGesture()
   }
 }
