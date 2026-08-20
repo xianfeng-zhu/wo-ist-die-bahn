@@ -1,7 +1,7 @@
 # liveberlin — Live Berlin Transit Map: Design
 
 **Date:** 2026-08-20
-**Status:** Approved (via brainstorming flow)
+**Status:** Approved (via brainstorming flow); architecture revised to frontend-direct per user decision 2026-08-20
 
 ## Goal
 
@@ -13,107 +13,90 @@ A public web app showing real-time positions of Berlin S-Bahn, U-Bahn, and tram 
 |---|---|---|---|
 | VBB GTFS-RT (`production.gtfsrt.vbb.de`) | No — TripUpdates (delays) only | Open, CC BY 4.0 | Not usable for positions |
 | VBB official API (`api.vbb.de`) | `journeyPosition` per single trip only; no `radar` | Email registration + terms | Not usable for all-vehicles view |
-| HAFAS `radar` (mgate) — VBB endpoint `fahrinfo.vbb.de/bin/mgate.exe` | Yes — all vehicles in bounding box (line, product, direction, next stops, polyline, frames) | Public webapp endpoint; no CORS | **Primary source** |
-| HAFAS `radar` — BVG endpoint `bvg-apps-ext.hafas.de/bin/mgate.exe` | Yes | Semi-public (AID in client) | Fallback via same adapter |
+| HAFAS `JourneyGeoPos` on `fahrinfo.vbb.de/bin/mgate.exe` | Yes — vehicles in bbox | **No CORS** → browser blocked | Server-side option only |
+| HAFAS `JourneyGeoPos` on `fahrinfo.vbb.de/gate` | Yes — vehicles in bbox | **CORS `*` (verified)** | **Primary source** |
 | Community `v6.bvg.transport.rest` | Yes | Free, rate-limited, volunteer-run | Unreachable during research; fallback only |
 
+**Protocol (reverse-engineered from live captures, 2026-08-20):**
+- Method is HCI `JourneyGeoPos` (not "radar"). POST JSON to `https://fahrinfo.vbb.de/gate?rnd=<ts>` with `ver 1.45`, `auth {type: AID, aid: hafas-vbb-webapp}`, `client {type: WEB, id: VBB, name: VBB WebApp, l: vs_webapp_vbb}`.
+- Request: `{maxJny, onlyRT: false, date: YYYYMMDD, time: HHMMSS, rect: {llCrd: {x: westLon×1e6, y: southLat×1e6}, urCrd: {x: eastLon×1e6, y: northLat×1e6}}, perSize: 30000, perStep: 10000, ageOfReport: true, jnyFltrL: [{type: PROD, mode: INC, value: 7}], trainPosMode: CALC}`.
+- **Product filter value 7** = rail only (S-Bahn bit 1, U-Bahn bit 2, tram bit 4; bus 8, ferry 16, express 32, regional 64). Verified: mask 7 → 283 rail vehicles (vs 778 all products).
+- Response: `svcResL[0].res.common.{locL, prodL}` + `jnyL[]` with `jid` (tripId), `prodX` (→ `prodL[prodX]`: `name` = line name, `cls` = product bitmask), `dirTxt` (direction), `pos {x, y}` (position ×1e6), `stopL[]` (stopovers: `locX` → `locL[locX].name`, scheduled `aTimeS/dTimeS`, realtime `aTimeR/dTimeR`; delay = realtime − scheduled, minutes).
+- `hafas-client` is **Node-only** (`node:buffer`, `https-proxy-agent` in `lib/request.js`) → cannot bundle in browser → hand-rolled HCI client (~80 lines), verified against `/gate` (283 vehicles, cls mapping 1/2/4 → suburban/subway/tram).
+
 **Caveats (documented):**
-- Public HAFAS endpoints are semi-official; VBB prefers contracted API access for production. Mitigation: one server-side poll per ~20 s, cache + broadcast, attribution, swappable `Upstream` adapter.
-- Some radar positions are interpolated from schedule/prognosis, not raw GPS. Visually smooth; may be slightly off on long inter-stop gaps.
-- No CORS on mgate → browser cannot call HAFAS directly → backend proxy required.
+- `/gate` is VBB's webapp endpoint, not a public API. CORS `*` today; VBB may rate-limit or block third-party browsers. No server-side mitigation possible in frontend-direct mode (client-side backoff only). If blocked: fallback is a tiny proxy or the community API.
+- `trainPosMode: CALC` → positions are calculated/interpolated from schedule/prognosis, not raw GPS for all vehicles. Visually smooth; may be slightly off on long inter-stop gaps.
+- Replacement-bus movements (e.g. "S9" bus during construction) carry product bit 8 → excluded by mask 7. S-Bahn *trains* unaffected.
 
-**Webapp inspection (browser, 2026-08-20):** `vbb.de/en/vbb-travel-info/` is a TYPO3 landing page linking to the real app at `fahrinfo.vbb.de/webapp/` — a HaCon HAFAS webapp (Leaflet + OSM tiles). Its "Live map & Multi-mobility" view shows **stations, routes, multi-mobility (rental) locations, and traffic messages only — no live vehicle positions**. Data flows over `fahrinfo.vbb.de/gate` (HCI JSON, `ver 1.77`, AID `hafas-vbb-webapp`, client `VBB WebApp / vs_webapp_vbb`) — the same HAFAS backend and same auth/client IDs that the `hafas-client` vbb profile uses (base.json verified earlier). Implication: VBB's public site does not expose a moving-vehicle map; `radar` is the mechanism that would power one, and it is verified working (778 movements in Berlin bbox).
+**Webapp inspection (browser, 2026-08-20):** `vbb.de/en/vbb-travel-info/` is a TYPO3 landing page linking to `fahrinfo.vbb.de/webapp/` — a HaCon HAFAS webapp (Leaflet + OSM tiles). Its "Live map & Multi-mobility" view shows stations, routes, multi-mobility locations, traffic messages — no live vehicles. Same HAFAS backend and AID credentials as our client. VBB's public site does not expose a moving-vehicle map; our app adds `JourneyGeoPos`.
 
-## Architecture
+## Architecture (frontend-direct, per user decision)
 
-Single-process TypeScript app. npm workspaces monorepo; one Docker container deploys everything.
-
-```
-liveberlin/
-├─ server/            # Node + TS + Express
-│  ├─ src/upstream/   # HAFAS adapter (swappable)
-│  ├─ src/poller.ts   # 20s radar poll → snapshot store
-│  ├─ src/sse.ts      # /api/vehicles/stream broadcast hub
-│  └─ src/server.ts   # Express: static web/dist + SSE + /healthz
-├─ web/               # Vite + vanilla TS + Leaflet
-└─ Dockerfile         # builds both, serves web/dist from server
-```
-
-## Data flow
+Pure static SPA. No backend. Vite + vanilla TS + Leaflet. Deployed to any static host (Cloudflare Pages / Netlify / GitHub Pages / Vercel).
 
 ```
-HAFAS mgate.exe
-  → hafas-client (vbb profile)
-  → Poller (every 20 s, Berlin bbox)
-  → Snapshot store { vehicles, updatedAt, stale }
-  → SSE hub (broadcast full snapshot)
-  → Browser EventSource
-  → Render loop → Leaflet canvas markers
+Browser (Vite SPA)
+  └─ HCI client (hand-rolled): POST JourneyGeoPos to fahrinfo.vbb.de/gate every 20 s
+       → parse svcResL (locL/prodL refs, j.pos)
+       → Vehicle[] → render badges on Leaflet
+  └─ static assets: stations.json, routes.json, line-colors.ts (from VBB GTFS + linienfarben)
 ```
 
-One poll serves all connected viewers. Full-snapshot broadcast (~50 KB per 20 s) — no delta compression.
+## Update mechanism
 
-## Components
+- **Browser ↔ VBB: request-based polling, 20 s interval.** No push exists from VBB (HAFAS is request/response). One poll per browser tab.
+- Client-side exponential backoff on consecutive failures (20 s → 60 s cap), stale/offline status in UI.
+- Payload: raw response ~600 KB for full Berlin at peak (283 rail vehicles); parsed down to ~30 KB of Vehicle objects in memory. `maxJny` can be lowered (e.g. 400) at night.
 
-### Server
+## Components (frontend)
 
-- **Upstream adapter** — interface `Upstream { getVehicles(bbox): Vehicle[] }`.
-  - `HafasUpstream` wraps `hafas-client` (VBB profile), transforms FPTF movements → `Vehicle { id, line, product: 'suburban'|'subway'|'tram', direction, lat, lon, nextStop, delayMs, updatedAt }`; filters out bus/regional server-side.
-  - BVG-profile implementation selectable via `UPSTREAM` env; same interface, no other code change.
-- **Poller** — Berlin bounding box (N 52.68 / S 52.34 / W 13.08 / E 13.76); `results` raised to cover network. On failure: exponential backoff (30 s → 2 min cap), keep last good snapshot, set `stale: true`.
-- **SSE hub** — full snapshot on connect; full snapshot per poll; periodic comment heartbeats; client count for observability.
-- **Server** — Express: static `web/dist`, `/healthz`, env config (`PORT`, `POLL_INTERVAL_MS`, `UPSTREAM`, `USER_AGENT`).
-
-### Frontend
-
-- Leaflet + OSM raster tiles, centered on Berlin. Mobile-friendly (full-height map, thumb-sized controls).
-- **Vehicle layer** — line-labeled badges (e.g. "S7", "U2", "M10") colored with VBB's official line colors (from the `linienfarben` dataset), mode-color fallback. Click → popup: line, direction, next stop, delay badge (red if ≥ 5 min).
-- **Station layer** (toggle) — rail stops from GTFS `stops.txt`, small dots, name popup.
+- **HCI client** — `buildRadarBody(bbox, {maxJny})` (pure, TDD), `parseRadar(json)` (pure, TDD, fixtures from real captures), `fetchVehicles()` (fetch wrapper with timeout + error surface).
+- **Vehicle transform** — `{id: jid, line: prod.name, product: cls→suburban|subway|tram, direction: dirTxt, lat/lon: pos, nextStop: first upcoming stopL locX→name, delayMs: realtime−scheduled}`.
+- **Map** — Leaflet + OSM tiles, centered Berlin; mobile-friendly.
+- **Vehicle layer** — line-labeled badges ("S7", "U2", "M10") in official line colors (`line-colors.ts` from VBB `linienfarben`), mode-color fallback. Click → popup: line, direction, next stop, delay badge (red if ≥ 5 min).
+- **Station layer** (toggle) — rail stops from GTFS `stops.txt`, dots, name popup.
 - **Route layer** (toggle) — rail route polylines from GTFS `shapes.txt`, colored by line.
-- Mode filter chips (S/U/tram) with live count; layer checkboxes (Stations, Routes).
-- Status bar: connection state (live / stale / offline), vehicle count, "updated N s ago". English UI.
-- v1 movement: `setLatLng` per snapshot. Radar `frames` interpolation = later upgrade, not v1.
+- **Mode filter chips** (S/U/tram) with live count; layer checkboxes; status bar (live/stale/offline, count, "updated N s ago"). English UI.
 
-### Static data assets (build-time, committed)
+## Static data assets (build-time, committed)
 
-- `web/scripts/prepare-data.mjs` — one-off prep script, kept for refresh:
-  - Downloads VBB GTFS zip (~82 MB, verified reachable; updated 2× weekly) from `unternehmen.vbb.de/gtfs`.
-  - Extracts rail stops + route shapes (tram/subway/S-Bahn), filters out bus/regional by `route_type` + line-name pattern.
-  - Emits `web/public/stations.json` and `web/public/routes.json` (GeoJSON, shape-decimated).
-  - Downloads `linienfarben.zip` (line colors CSV) → generates `web/src/line-colors.ts`.
+- `web/scripts/prepare-data.mjs` — downloads VBB GTFS zip (~82 MB, verified; updated 2× weekly) from `unternehmen.vbb.de/gtfs`, extracts rail stops + route shapes (filter bus/regional by `route_type` + line-name pattern), emits `web/public/stations.json` + `web/public/routes.json` (GeoJSON, decimated). Downloads `linienfarben.zip` → generates `web/src/line-colors.ts`. Kept in repo for refresh.
 
-## Error handling
+## Error handling (client-side only)
 
-- Upstream down → backoff + `stale: true` → UI banner "data delayed"; last snapshot kept.
-- Radar truncation at `results` limit → log; if recurring, quadrant-split polling merged server-side (documented fallback, not built).
-- EventSource auto-reconnects; reconnect gets fresh full snapshot.
+- Fetch failure / timeout → exponential backoff (20 s → 60 s cap), status "offline"; keep last good vehicle set (badges stay, "updated Ns ago" grows).
+- `svcResL[0].err !== OK` or missing `jnyL` → treat as empty poll, backoff.
+- `pos` missing on a journey → skip that vehicle.
+- EventSource/SSE not applicable (no server).
 
 ## Testing
 
-- Unit: FPTF→Vehicle transform, product filtering, poller backoff (fake upstream), SSE payload shape.
-- Smoke: one live radar poll validates shape/counts; browser-drive running app — markers appear, filters work, popup shows real data.
-- Deploy: container starts, `/healthz` green, second process receives SSE frames.
+- Unit (vitest): `buildRadarBody` shape; `parseRadar` against captured fixture (283-vehicle response → correct products/lines/positions); vehicle transform edge cases; `delayFrom` wrap-around (23:59→00:05); next-stop heuristic; `filterVehicles`.
+- Live smoke: `node` run of the exact client code against `/gate` (already proven: 283 rail vehicles).
+- Browser verification: static-serve the built app, drive with browser tool — badges appear and move, filters, station/route toggles, popups, status bar, mobile viewport.
 
 ## Deployment
 
-- Single Docker image → Fly.io or Railway + domain + HTTPS.
-- Footer attribution: "Live data: VBB · Map: © OpenStreetMap contributors".
+Static build `web/dist` → Cloudflare Pages / Netlify / GitHub Pages / Vercel. No server, no Docker, no env config.
 
 ## Non-goals (v1)
 
-Bus display, historical tracking, vehicle-follow mode, auth, multi-instance fan-out (needs Redis).
+Bus display, historical tracking, vehicle-follow mode, auth, server-side caching/aggregation (architecture choice).
 
 ## Product decisions (user-confirmed 2026-08-20)
 
-1. **Update mechanism** — server polls HAFAS every 20 s (request-based, server-side only); browsers get updates via SSE server push. No per-user requests.
+1. **Update mechanism** — frontend-direct: browser polls `fahrinfo.vbb.de/gate` every 20 s; no backend. (User chose over server proxy after evidence: CORS `*` verified on `/gate`, radar verified. Accepted tradeoffs: per-browser upstream load, no central backoff, no SSE push.)
 2. **Markers** — line-labeled badges in official line colors.
 3. **Layers** — vehicles + stations toggle + routes toggle (VBB-style map).
 4. **Language** — English UI; station/direction names stay German (as delivered).
 5. **Devices** — mobile-friendly.
+6. **Poll cadence** — 20 s (HAFAS data refreshes at ~15–30 s anyway).
 
 ## Decisions
 
-1. **Approach A** (single process + SSE + vanilla TS + Leaflet) over split React/MapLibre or frontend-only community API — fewest parts, one poll loop, boring stack. User-approved.
-2. **TS end-to-end** — HAFAS client is Node-native. User-approved.
-3. **S/U/tram only** — buses excluded from UI v1 (data still fetched, filtered server-side). User-approved.
-4. **Public web app** — single-container deploy target. User-approved.
+1. Frontend-direct static SPA over server proxy — per user decision; risks documented above, fallback path (tiny proxy) exists if VBB blocks.
+2. Hand-rolled HCI client over `hafas-client` — hafas-client cannot bundle in browser.
+3. TS + Vite + Leaflet + vitest — user-approved stack, boring components.
+4. S/U/tram only — buses excluded (mask 7 filters server-side of our request).
+5. Public web app — static hosting, zero-infra.
