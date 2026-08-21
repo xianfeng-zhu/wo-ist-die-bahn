@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAnimation, AnimState, pointAlongPath} from './motion.js'
+import {advanceAnimation, AnimState, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
@@ -96,10 +96,7 @@ function badgeElement(v: Vehicle): HTMLElement {
   const el = document.createElement('div')
   el.className = 'veh'
   el.style.background = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
-  const arrow = document.createElement('span')
-  arrow.className = 'veh-arrow'
-  arrow.textContent = '▲'
-  el.append(arrow, v.line)
+  el.textContent = v.line
   return el
 }
 
@@ -171,6 +168,7 @@ function render() {
 
 // --- animation loop: smooth, forward-only, track-following movement ---
 let lastFrame = performance.now()
+let lastPathsUpdate = 0
 function frame(now: number) {
 
   const dt = Math.min(now - lastFrame, 100) // clamp gaps (e.g. after tab hidden)
@@ -183,15 +181,12 @@ function frame(now: number) {
       if (m) {
         const [lat, lon] = pointAlongPath(next.path, next.progress)
         m.setLngLat([lon, lat])
-        // arrow points along the track (tangent at the current position);
-        // at the segment end there is no tangent — keep the last heading
-        if (next.progress < 0.999) {
-          const ahead = pointAlongPath(next.path, Math.min(1, next.progress + 0.02))
-          const deg = Math.atan2(ahead[1] - lon, ahead[0] - lat) * 180 / Math.PI
-          const arrow = m.getElement().querySelector('.veh-arrow') as HTMLElement | null
-          if (arrow) arrow.style.transform = `rotate(${deg.toFixed(1)}deg)`
-        }
       }
+    }
+    // refresh the current-position → target paths a few times per second
+    if (now - lastPathsUpdate > 500) {
+      lastPathsUpdate = now
+      updateTargetsFeatures()
     }
   }
   requestAnimationFrame(frame)
@@ -222,6 +217,7 @@ map.on('load', addTargetsLayers)
 
 
 function updateTargetsFeatures() {
+  if (!map.getLayer('targets-layer') || map.getLayoutProperty('targets-layer', 'visibility') === 'none') return
   const features: Array<{type: 'Feature'; geometry: {type: 'Point' | 'LineString'; coordinates: unknown}; properties: Record<string, unknown>}> = []
   for (const v of vehicles) {
     const s = animStates.get(v.id)
@@ -231,9 +227,15 @@ function updateTargetsFeatures() {
       geometry: {type: 'Point', coordinates: [s.end.lon, s.end.lat]},
       properties: {name: s.endName ?? v.nextStop ?? v.id}
     })
+    // path from the vehicle's CURRENT animated position to the target
+    const cur = pointAlongPath(s.path, s.progress)
+    const last = s.path[s.path.length - 1]
+    const total = projectOntoPath(s.path, {lat: last[0], lon: last[1]}).along
+    const along = projectOntoPath(s.path, {lat: cur[0], lon: cur[1]}).along
+    const remaining = slicePath(s.path, along, total)
     features.push({
       type: 'Feature',
-      geometry: {type: 'LineString', coordinates: s.path.map(([lat, lon]) => [lon, lat])},
+      geometry: {type: 'LineString', coordinates: remaining.map(([lat, lon]) => [lon, lat])},
       properties: {}
     })
   }
