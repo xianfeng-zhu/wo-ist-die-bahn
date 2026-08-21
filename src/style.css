@@ -18,10 +18,18 @@ body { font: 13px system-ui, sans-serif; }
   padding: 2px 6px; border-radius: 4px;
 }
 .veh {
+  position: relative;
   min-width: 24px; height: 20px; padding: 0 4px; border-radius: 10px;
   color: #fff; font: 700 11px/20px system-ui; text-align: center;
   border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.5);
   cursor: pointer;
+}
+.veh-arrow {
+  position: absolute; top: -13px; left: 50%; width: 14px; height: 13px;
+  margin-left: -7px; transform-origin: 50% 100%;
+  font-size: 10px; line-height: 13px; text-align: center;
+  color: #222; text-shadow: 0 0 2px #fff;
+  pointer-events: none;
 }
 @media (max-width: 640px) {
   #statusbar { top: 8px; left: 8px; font-size: 12px; }
