@@ -183,11 +183,14 @@ function frame(now: number) {
       if (m) {
         const [lat, lon] = pointAlongPath(next.path, next.progress)
         m.setLngLat([lon, lat])
-        // arrow points along the track (tangent at the current position)
-        const ahead = pointAlongPath(next.path, Math.min(1, next.progress + 0.02))
-        const deg = Math.atan2(ahead[1] - lon, ahead[0] - lat) * 180 / Math.PI
-        const arrow = m.getElement().querySelector('.veh-arrow') as HTMLElement | null
-        if (arrow) arrow.style.transform = `rotate(${deg.toFixed(1)}deg)`
+        // arrow points along the track (tangent at the current position);
+        // at the segment end there is no tangent — keep the last heading
+        if (next.progress < 0.999) {
+          const ahead = pointAlongPath(next.path, Math.min(1, next.progress + 0.02))
+          const deg = Math.atan2(ahead[1] - lon, ahead[0] - lat) * 180 / Math.PI
+          const arrow = m.getElement().querySelector('.veh-arrow') as HTMLElement | null
+          if (arrow) arrow.style.transform = `rotate(${deg.toFixed(1)}deg)`
+        }
       }
     }
   }
