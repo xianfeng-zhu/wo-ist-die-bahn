@@ -23,6 +23,23 @@ const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-
 
 // MapLibre GL: native smooth trackpad zoom, WebGL tile rendering (no white
 // flashing, no tile-management gaps), tile overscaling capped by the engine.
+// Persist the user's map view (center + zoom) across page refreshes.
+const VIEW_KEY = 'liveberlin.mapview'
+function loadView(): {center: [number, number]; zoom: number} | null {
+  try {
+    const raw = localStorage.getItem(VIEW_KEY)
+    if (!raw) return null
+    const v = JSON.parse(raw) as {lng?: number; lat?: number; zoom?: number}
+    if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || typeof v.zoom !== 'number') return null
+    if (![v.lng, v.lat, v.zoom].every(Number.isFinite)) return null
+    if (Math.abs(v.lat) > 85 || Math.abs(v.lng) > 180 || v.zoom < 0 || v.zoom > 19) return null
+    return {center: [v.lng, v.lat], zoom: v.zoom}
+  } catch {
+    return null
+  }
+}
+const savedView = loadView()
+
 const map = new GLMap({
   container: 'map',
   style: {
@@ -38,9 +55,18 @@ const map = new GLMap({
     },
     layers: [{id: 'osm', type: 'raster', source: 'osm'}]
   },
-  center: [13.405, 52.52],
-  zoom: 12,
+  center: savedView?.center ?? [13.405, 52.52],
+  zoom: savedView?.zoom ?? 12,
   maxZoom: 19
+})
+
+map.on('moveend', () => {
+  const c = map.getCenter()
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify({lng: c.lng, lat: c.lat, zoom: map.getZoom()}))
+  } catch {
+    // storage unavailable (private mode etc.) — view just won't persist
+  }
 })
 
 
