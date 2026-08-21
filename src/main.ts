@@ -196,17 +196,24 @@ requestAnimationFrame(frame)
 // --- debug/test: show each vehicle's next target (stop) + segment path ---
 function addTargetsLayers() {
   map.addSource('targets', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
+  // white casing underneath for contrast on any map background
   map.addLayer({
-    id: 'targets-layer',
-    type: 'circle',
+    id: 'anim-paths-casing',
+    type: 'line',
     source: 'targets',
-    paint: {'circle-radius': 4, 'circle-color': '#e65100', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1}
+    paint: {'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9}
   })
   map.addLayer({
     id: 'anim-paths-layer',
     type: 'line',
     source: 'targets',
-    paint: {'line-color': '#e65100', 'line-width': 1.5, 'line-opacity': 0.5}
+    paint: {'line-color': '#ff6d00', 'line-width': 3.5, 'line-opacity': 0.95}
+  })
+  map.addLayer({
+    id: 'targets-layer',
+    type: 'circle',
+    source: 'targets',
+    paint: {'circle-radius': 7, 'circle-color': '#ff6d00', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5}
   })
   map.on('click', 'targets-layer', (e: MapLayerMouseEvent) => {
     const name = e.features?.[0]?.properties?.name
@@ -362,7 +369,7 @@ const targetsCb = document.createElement('input')
 targetsCb.type = 'checkbox'
 targetsCb.checked = true
 targetsCb.onchange = () => {
-  for (const id of ['targets-layer', 'anim-paths-layer']) {
+  for (const id of ['targets-layer', 'anim-paths-layer', 'anim-paths-casing']) {
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', targetsCb.checked ? 'visible' : 'none')
   }
 }
