@@ -4,6 +4,8 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
+import {advanceAnimation, AnimState, pointAlongPath} from './motion.js'
+import {buildSegmentPath, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
 // the module; Vite doesn't emit it, so point it at the copy we ship in
@@ -13,6 +15,8 @@ setWorkerUrl('/maplibre-gl-worker.mjs')
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
 const POLL_INTERVAL_MS = 20000
 const MAX_BACKOFF_MS = 60000
+// ?all=1 shows every returned vehicle (incl. FEX etc.) for testing the animation
+const TEST_ALL = new URLSearchParams(location.search).has('all')
 
 const PRODUCT_COLORS: Record<Product, string> = {suburban: '#2e7d32', subway: '#1565c0', tram: '#c62828'}
 const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram'}
@@ -39,12 +43,20 @@ const map = new GLMap({
   maxZoom: 19
 })
 
+
 // --- vehicle markers (line-labeled badges) ---
 const markers = new Map<string, Marker>()
 const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
 let vehicles: Vehicle[] = []
 let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
+
+// --- smooth track-following animation ---
+// speedFactor 1.0 = real-time pace (from realtime stop times); acceleration
+// limits smooth out all speed changes (data updates, pauses, factor changes)
+const ANIM = {speedFactor: 1, maxAccel: 0.01, maxDecel: 0.01}
+const animStates = new Map<string, AnimState>()
+let lineShapes: LineShapes = {}
 
 const statusEl = document.getElementById('statusbar')!
 function updateStatus() {
@@ -71,6 +83,36 @@ function popupHtml(v: Vehicle): string {
   )
 }
 
+/** (Re)build or update a vehicle's animation segment from its latest data. */
+function updateSegment(v: Vehicle, m: Marker) {
+  const prev = animStates.get(v.id)
+  if (!v.segEnd) {
+    // no next-stop data: static marker at the polled position
+    animStates.delete(v.id)
+    m.setLngLat([v.lon, v.lat])
+    return
+  }
+  if (!prev || prev.endName !== v.segEnd.name) {
+    // new segment: continue from the current animated position (never jumps).
+    // The arrival is anchored to NOW + the schedule segment duration (HAFAS
+    // absolute stop times are unreliable — ~24h stale for night services).
+    const from = prev ? pointAlongPath(prev.path, prev.progress) : [v.lat, v.lon]
+    const path = buildSegmentPath(lineShapes, v.line, {lat: from[0], lon: from[1]}, {lat: v.segEnd.lat, lon: v.segEnd.lon})
+    animStates.set(v.id, {
+      progress: 0,
+      velocity: 0,
+      start: {lat: from[0], lon: from[1]},
+      end: {lat: v.segEnd.lat, lon: v.segEnd.lon},
+      endT: Date.now() + v.segEnd.durationMs,
+      endName: v.segEnd.name,
+      path
+    })
+  } else {
+    // same next stop: keep the arrival aligned with the remaining progress
+    animStates.set(v.id, {...prev, endT: Date.now() + v.segEnd.durationMs * (1 - prev.progress)})
+  }
+}
+
 function render() {
   const visible = filterVehicles(vehicles, filters)
   const seen = new Set<string>()
@@ -83,18 +125,85 @@ function render() {
         .setPopup(new Popup({offset: 20}).setHTML(popupHtml(v)))
         .addTo(map)
       markers.set(v.id, m)
-    } else {
-      m.setLngLat([v.lon, v.lat])
-      m.getPopup()?.setHTML(popupHtml(v))
     }
+    updateSegment(v, m)
+    m.getPopup()?.setHTML(popupHtml(v))
   }
   for (const [id, m] of markers) {
     if (!seen.has(id)) {
       m.remove()
       markers.delete(id)
+      animStates.delete(id)
     }
   }
+  updateTargetsFeatures()
   updateStatus()
+}
+
+// --- animation loop: smooth, forward-only, track-following movement ---
+let lastFrame = performance.now()
+function frame(now: number) {
+
+  const dt = Math.min(now - lastFrame, 100) // clamp gaps (e.g. after tab hidden)
+  lastFrame = now
+  if (animStates.size > 0) {
+    for (const [id, s] of animStates) {
+      const next = advanceAnimation(s, Date.now(), dt, ANIM)
+      animStates.set(id, next)
+      const m = markers.get(id)
+      if (m) {
+        const [lat, lon] = pointAlongPath(next.path, next.progress)
+        m.setLngLat([lon, lat])
+      }
+    }
+  }
+  requestAnimationFrame(frame)
+}
+requestAnimationFrame(frame)
+
+// --- debug/test: show each vehicle's next target (stop) + segment path ---
+function addTargetsLayers() {
+  map.addSource('targets', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
+  map.addLayer({
+    id: 'targets-layer',
+    type: 'circle',
+    source: 'targets',
+    layout: {visibility: 'none'},
+    paint: {'circle-radius': 4, 'circle-color': '#e65100', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1}
+  })
+  map.addLayer({
+    id: 'anim-paths-layer',
+    type: 'line',
+    source: 'targets',
+    layout: {visibility: 'none'},
+    paint: {'line-color': '#e65100', 'line-width': 1.5, 'line-opacity': 0.5}
+  })
+  map.on('click', 'targets-layer', (e: MapLayerMouseEvent) => {
+    const name = e.features?.[0]?.properties?.name
+    if (name) new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
+  })
+}
+map.on('load', addTargetsLayers)
+
+
+function updateTargetsFeatures() {
+  const features: Array<{type: 'Feature'; geometry: {type: 'Point' | 'LineString'; coordinates: unknown}; properties: Record<string, unknown>}> = []
+  for (const v of vehicles) {
+    const s = animStates.get(v.id)
+    if (!s) continue
+    features.push({
+      type: 'Feature',
+      geometry: {type: 'Point', coordinates: [s.end.lon, s.end.lat]},
+      properties: {name: s.endName ?? v.nextStop ?? v.id}
+    })
+    features.push({
+      type: 'Feature',
+      geometry: {type: 'LineString', coordinates: s.path.map(([lat, lon]) => [lon, lat])},
+      properties: {}
+    })
+  }
+  const src = map.getSource('targets') as {setData(data: unknown): void} | undefined
+  src?.setData({type: 'FeatureCollection', features})
 }
 
 // --- station + route layers (GeoJSON, toggleable) ---
@@ -121,6 +230,15 @@ async function loadNetworkLayers() {
   }
   try {
     const routes = await (await fetch('/routes.json')).json()
+    lineShapes = {}
+    for (const f of routes.features ?? []) {
+      const line = f.properties?.line
+      const coords = f.geometry?.coordinates
+      if (line && Array.isArray(coords)) {
+        // GeoJSON [lon, lat] -> [lat, lon]
+        lineShapes[line] = coords.map((c: [number, number]) => [c[1], c[0]])
+      }
+    }
     for (const f of routes.features ?? []) {
       const line = f.properties?.line
       const product = f.properties?.product as Product | undefined
@@ -147,7 +265,8 @@ async function poll() {
   controller = new AbortController()
   const t = setTimeout(() => controller!.abort(), 15000)
   try {
-    vehicles = await fetchVehicles(BERLIN_BBOX, 2000, controller.signal)
+    // ?all=1: include every returned vehicle (e.g. FEX) for animation testing
+    vehicles = await fetchVehicles(BERLIN_BBOX, 2000, controller.signal, !TEST_ALL)
     lastUpdate = Date.now()
     failures = 0
     nextDelay = POLL_INTERVAL_MS
@@ -163,6 +282,7 @@ async function poll() {
     setTimeout(() => void poll(), nextDelay)
   }
 }
+
 void poll()
 
 // --- mode filters + layer toggles ---
@@ -197,3 +317,17 @@ const toggleLayer = (layerId: string, name: string) => {
 }
 toggleLayer('stations-layer', 'Stations')
 toggleLayer('routes-layer', 'Routes')
+
+// Targets: next-stop dots + animated segment paths (debug/test view)
+const targetsLabel = document.createElement('label')
+targetsLabel.className = 'layer'
+const targetsCb = document.createElement('input')
+targetsCb.type = 'checkbox'
+targetsCb.onchange = () => {
+  for (const id of ['targets-layer', 'anim-paths-layer']) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', targetsCb.checked ? 'visible' : 'none')
+  }
+}
+targetsLabel.append(targetsCb, ' Targets')
+
+filterEl.append(targetsLabel)

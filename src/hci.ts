@@ -61,7 +61,7 @@ interface RadarResponse {
     err?: string
     res?: {
       common?: {
-        locL?: Array<{name?: string}>
+        locL?: Array<{name?: string; crd?: {x?: number; y?: number}}>
         prodL?: Array<{name?: string; cls?: number}>
       }
       jnyL?: Journey[]
@@ -69,7 +69,7 @@ interface RadarResponse {
   }>
 }
 
-export function parseRadar(json: unknown, nowTime: string): Vehicle[] {
+export function parseRadar(json: unknown, nowTime: string, strictName = true): Vehicle[] {
   const svc = (json as RadarResponse).svcResL?.[0]
   if (!svc || svc.err !== 'OK') throw new Error(`HAFAS error: ${svc?.err ?? 'no svcResL'}`)
   const res = svc.res ?? {}
@@ -78,11 +78,11 @@ export function parseRadar(json: unknown, nowTime: string): Vehicle[] {
     prods: res.common?.prodL ?? []
   }
   return (res.jnyL ?? [])
-    .map((j: Journey) => transformJourney(j, common, nowTime))
+    .map((j: Journey) => transformJourney(j, common, nowTime, strictName))
     .filter((v: Vehicle | null): v is Vehicle => v !== null)
 }
 
-export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal): Promise<Vehicle[]> {
+export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal, strictName = true): Promise<Vehicle[]> {
   const {date, time} = berlinDateTime(new Date())
   const res = await fetch(`${GATE_URL}?rnd=${Date.now()}`, {
     method: 'POST',
@@ -92,5 +92,5 @@ export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSig
   })
   if (!res.ok) throw new Error(`HAFAS HTTP ${res.status}`)
   const json = await res.json()
-  return parseRadar(json, time)
+  return parseRadar(json, time, strictName)
 }

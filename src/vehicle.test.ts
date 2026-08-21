@@ -104,3 +104,34 @@ describe('filterVehicles', () => {
     expect(out.map(x => x.product)).toEqual(['suburban', 'tram'])
   })
 })
+
+describe('line-name product gate', () => {
+  const mk = (name: string, cls: number) => ({
+    jid: 'j', prodX: 0, dirTxt: 'd',
+    pos: {x: 13490000, y: 52460000},
+    stopL: []
+  })
+  const commonFor = (prods: Array<{name?: string; cls?: number}>) => ({locs: [], prods})
+  it('keeps S-Bahn, U-Bahn and tram names', () => {
+    for (const [name, cls] of [['S7', 1], ['S85', 1], ['U2', 2], ['U12', 2], ['M10', 4], ['68', 4]] as const) {
+      expect(transformJourney(mk(name, cls) as never, commonFor([{name, cls}]), '23:00:00')).not.toBeNull()
+    }
+  })
+  it('rejects non-S/U/tram names even with a rail cls (e.g. FEX)', () => {
+    expect(transformJourney(mk('FEX', 1) as never, commonFor([{name: 'FEX', cls: 1}]), '23:00:00')).toBeNull()
+    expect(transformJourney(mk('RE1', 2) as never, commonFor([{name: 'RE1', cls: 2}]), '23:00:00')).toBeNull()
+  })
+})
+
+describe('test mode (strictName: false)', () => {
+  it('keeps FEX with an inferred product', () => {
+    const j = {jid: 'f1', prodX: 0, dirTxt: 'd', pos: {x: 13490000, y: 52460000}, stopL: []}
+    const v = transformJourney(j as never, {locs: [], prods: [{name: 'FEX', cls: 64}]}, '23:00:00', false)
+    expect(v).not.toBeNull()
+    expect(v?.line).toBe('FEX')
+  })
+  it('still drops vehicles without a position in test mode', () => {
+    const j = {jid: 'f1', prodX: 0, dirTxt: 'd', pos: null, stopL: []}
+    expect(transformJourney(j as never, {locs: [], prods: [{name: 'FEX', cls: 64}]}, '23:00:00', false)).toBeNull()
+  })
+})
