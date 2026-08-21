@@ -10,8 +10,8 @@ export interface Vehicle {
   lon: number
   nextStop: string | null
   delayMs: number | null
-  /** Next stop as animation target (coords + schedule segment duration ms). */
-  segEnd?: {name: string; lat: number; lon: number; durationMs: number}
+  /** Remaining stops of the trip (index 0 = current/just-left stop). */
+  stops?: Array<{name: string; lat: number; lon: number; t: string}>
 }
 
 export const PRODUCT_BY_CLS: Record<number, Product> = {1: 'suburban', 2: 'subway', 4: 'tram'}
@@ -96,27 +96,20 @@ export function transformJourney(j: Journey, common: Common, nowTime: string, st
   if (strictName && !LINE_PATTERNS[product].test(prod?.name ?? '')) return null // e.g. FEX
   if (!j.pos?.x || !j.pos?.y) return null
   const nowSec = toSec(nowTime)
-  const stops = j.stopL ?? []
-  const next = stops.find(s => {
+  const stopovers = j.stopL ?? []
+  const next = stopovers.find(s => {
     const t = s.aTimeS ?? s.dTimeS
     return !!t && toSec(t) >= nowSec
-  }) ?? stops[1] ?? stops[0]
+  }) ?? stopovers[1] ?? stopovers[0]
   const nextLoc = next ? common.locs[next.locX ?? -1] : undefined
-  const cur = stops[0]
-  const curTime = cur?.dTimeR ?? cur?.dTimeS ?? cur?.aTimeR ?? cur?.aTimeS
-  const nextTime = next?.aTimeR ?? next?.aTimeS ?? next?.dTimeR ?? next?.dTimeS
-  let segEnd: Vehicle['segEnd']
-  if (nextLoc?.name && nextLoc.crd?.x != null && nextLoc.crd.y != null && nextTime && curTime) {
-    // Schedule-derived segment duration (relative, immune to the operating-day
-    // date lag); HAFAS absolute times can be ~24h stale for night services.
-    let durationMs = (toSec(nextTime) - toSec(curTime)) * 1000
-    if (durationMs < 0) durationMs += 24 * 3600 * 1000 // overnight wrap
-    durationMs = Math.min(Math.max(durationMs, 10000), 30 * 60 * 1000)
-    segEnd = {
-      name: nextLoc.name,
-      lat: nextLoc.crd.y / 1e6,
-      lon: nextLoc.crd.x / 1e6,
-      durationMs: Number.isFinite(durationMs) ? durationMs : 60000
+  // remaining stops with coords + times (realtime preferred); index 0 is the
+  // current/just-left stop, the rest chain the animation forward
+  const stops: Vehicle['stops'] = []
+  for (const s of stopovers.slice(0, 7)) {
+    const loc = common.locs[s.locX ?? -1]
+    const t = s.aTimeR ?? s.aTimeS ?? s.dTimeR ?? s.dTimeS
+    if (loc?.name && loc.crd?.x != null && loc.crd.y != null && t) {
+      stops.push({name: loc.name, lat: loc.crd.y / 1e6, lon: loc.crd.x / 1e6, t})
     }
   }
   return {
@@ -128,6 +121,6 @@ export function transformJourney(j: Journey, common: Common, nowTime: string, st
     lon: j.pos.x / 1e6,
     nextStop: next ? nextLoc?.name ?? null : null,
     delayMs: next ? delayFrom(next) : null,
-    segEnd
+    stops: stops.length >= 2 ? stops : undefined
   }
 }

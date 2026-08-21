@@ -5,6 +5,13 @@ export interface LatLon {
   lon: number
 }
 
+export interface StopLike {
+  name: string
+  lat: number
+  lon: number
+  t: string // HHMMSS (realtime-preferred), relative differences are stable
+}
+
 export interface AnimState {
   /** 0..1 along the segment path (0 = segment start, 1 = next stop). */
   progress: number
@@ -20,6 +27,28 @@ export interface AnimState {
   endName?: string
   /** Track from start to end (lat/lon); falls back to a straight line. */
   path: Array<[number, number]>
+  /** Remaining stops of the trip (index 0 = current/just-left stop). */
+  stops?: StopLike[]
+  /** Which stop is the current segment's target (index into `stops`). */
+  segIndex?: number
+  /** Line name (needed to slice the track for chained segments). */
+  line?: string
+}
+
+/**
+ * Schedule duration (ms) between two stop times. Relative differences are
+ * stable even when HAFAS absolute times lag by an operating day. Overnight
+ * wrap is handled; result clamped to [10s, 30min], 60s fallback.
+ */
+export function timeDiffMs(prev: string, next: string): number {
+  const toSec = (s: string): number => {
+    const d = s.replace(/:/g, '').padStart(6, '0')
+    return Number(d.slice(0, 2)) * 3600 + Number(d.slice(2, 4)) * 60 + Number(d.slice(4, 6))
+  }
+  let diff = (toSec(next) - toSec(prev)) * 1000
+  if (diff < 0) diff += 24 * 3600 * 1000
+  if (!Number.isFinite(diff)) return 60000
+  return Math.min(Math.max(diff, 10000), 30 * 60 * 1000)
 }
 
 export interface MotionOpts {

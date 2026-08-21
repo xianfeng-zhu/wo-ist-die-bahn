@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAnimation, berlinEpoch, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAnimation, berlinEpoch, pointAlongPath, projectOntoPath, slicePath, timeDiffMs} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -95,5 +95,18 @@ describe('advanceAnimation', () => {
     const s = advanceAnimation({...base, velocity: 0.02, progress: 0.5}, t0, 1000, {speedFactor: 1, maxAccel: 0.01, maxDecel: 0.01})
     expect(s.progress).toBeGreaterThanOrEqual(0.5)
     expect(s.velocity).toBeLessThan(0.02)
+  })
+})
+
+describe('timeDiffMs', () => {
+  it('computes the schedule duration between two stop times', () => {
+    expect(timeDiffMs('01022100', '01023500')).toBe(14000)
+  })
+  it('handles overnight wrap', () => {
+    expect(timeDiffMs('23590000', '00030000')).toBe(240000)
+  })
+  it('clamps extreme values and falls back on missing data', () => {
+    expect(timeDiffMs('01000000', '02000000')).toBe(30 * 60 * 1000) // > 30min cap
+    expect(timeDiffMs('01000000', '01001000')).toBe(10000) // < 10s floor
   })
 })

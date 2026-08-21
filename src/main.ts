@@ -4,8 +4,8 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAnimation, AnimState, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
-import {buildSegmentPath, LineShapes} from './track.js'
+import {advanceAnimation, AnimState, pointAlongPath, projectOntoPath, slicePath, timeDiffMs} from './motion.js'
+import {buildSegmentPath, firstStopAhead, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
 // the module; Vite doesn't emit it, so point it at the copy we ship in
@@ -60,6 +60,7 @@ const map = new GLMap({
   maxZoom: 19
 })
 
+
 map.on('moveend', () => {
   const c = map.getCenter()
   try {
@@ -109,34 +110,39 @@ function popupHtml(v: Vehicle): string {
   )
 }
 
-/** (Re)build or update a vehicle's animation segment from its latest data. */
+/** (Re)build a vehicle's animation chain from its latest data, continuing
+ * from the current animated position (never jumps). */
 function updateSegment(v: Vehicle, m: Marker) {
   const prev = animStates.get(v.id)
-  if (!v.segEnd) {
-    // no next-stop data: static marker at the polled position
+  if (!v.stops || v.stops.length < 2) {
+    // no stop-chain data: static marker at the polled position
     animStates.delete(v.id)
     m.setLngLat([v.lon, v.lat])
     return
   }
-  if (!prev || prev.endName !== v.segEnd.name) {
-    // new segment: continue from the current animated position (never jumps).
-    // The arrival is anchored to NOW + the schedule segment duration (HAFAS
-    // absolute stop times are unreliable — ~24h stale for night services).
-    const from = prev ? pointAlongPath(prev.path, prev.progress) : [v.lat, v.lon]
-    const path = buildSegmentPath(lineShapes, v.line, {lat: from[0], lon: from[1]}, {lat: v.segEnd.lat, lon: v.segEnd.lon})
-    animStates.set(v.id, {
-      progress: 0,
-      velocity: 0,
-      start: {lat: from[0], lon: from[1]},
-      end: {lat: v.segEnd.lat, lon: v.segEnd.lon},
-      endT: Date.now() + v.segEnd.durationMs,
-      endName: v.segEnd.name,
-      path
-    })
-  } else {
-    // same next stop: keep the arrival aligned with the remaining progress
-    animStates.set(v.id, {...prev, endT: Date.now() + v.segEnd.durationMs * (1 - prev.progress)})
+  const from = prev ? pointAlongPath(prev.path, prev.progress) : [v.lat, v.lon]
+  const fromPos = {lat: from[0], lon: from[1]}
+  const k = firstStopAhead(lineShapes, v.line, fromPos, v.stops)
+  if (k < 1) {
+    // no known stop ahead — hold at the current position
+    animStates.delete(v.id)
+    m.setLngLat([from[0], from[1]])
+    return
   }
+  const target = v.stops[k]
+  const path = buildSegmentPath(lineShapes, v.line, fromPos, {lat: target.lat, lon: target.lon})
+  animStates.set(v.id, {
+    progress: 0,
+    velocity: Math.max(0, prev?.velocity ?? 0), // keep momentum across re-anchors
+    start: fromPos,
+    end: {lat: target.lat, lon: target.lon},
+    endT: Date.now() + timeDiffMs(v.stops[k - 1].t, target.t),
+    endName: target.name,
+    path,
+    stops: v.stops,
+    segIndex: k,
+    line: v.line
+  })
 }
 
 function render() {
@@ -176,10 +182,33 @@ function frame(now: number) {
   if (animStates.size > 0) {
     for (const [id, s] of animStates) {
       const next = advanceAnimation(s, Date.now(), dt, ANIM)
-      animStates.set(id, next)
+      const stops = next.stops
+      const segIndex = next.segIndex ?? 0
+      if (next.progress >= 1 && stops && stops.length >= 2 && segIndex < stops.length - 1) {
+        // arrived at the target: continue to the FOLLOWING stop so the tram
+        // keeps moving until fresh data arrives
+        const k = segIndex + 1
+        const fromPos = {lat: stops[k].lat, lon: stops[k].lon}
+        const target = stops[k + 1]
+        const path = buildSegmentPath(lineShapes, next.line, fromPos, {lat: target.lat, lon: target.lon})
+        animStates.set(id, {
+          ...next,
+          progress: 0,
+          velocity: Math.max(0, next.velocity), // keep momentum
+          start: fromPos,
+          end: {lat: target.lat, lon: target.lon},
+          endT: Date.now() + timeDiffMs(stops[k].t, target.t),
+          endName: target.name,
+          segIndex: k,
+          path
+        })
+      } else {
+        animStates.set(id, next)
+      }
       const m = markers.get(id)
       if (m) {
-        const [lat, lon] = pointAlongPath(next.path, next.progress)
+        const s2 = animStates.get(id)!
+        const [lat, lon] = pointAlongPath(s2.path, s2.progress)
         m.setLngLat([lon, lat])
       }
     }
