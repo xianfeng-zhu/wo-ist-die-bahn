@@ -168,14 +168,12 @@ function addTargetsLayers() {
     id: 'targets-layer',
     type: 'circle',
     source: 'targets',
-    layout: {visibility: 'none'},
     paint: {'circle-radius': 4, 'circle-color': '#e65100', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1}
   })
   map.addLayer({
     id: 'anim-paths-layer',
     type: 'line',
     source: 'targets',
-    layout: {visibility: 'none'},
     paint: {'line-color': '#e65100', 'line-width': 1.5, 'line-opacity': 0.5}
   })
   map.on('click', 'targets-layer', (e: MapLayerMouseEvent) => {
@@ -323,6 +321,7 @@ const targetsLabel = document.createElement('label')
 targetsLabel.className = 'layer'
 const targetsCb = document.createElement('input')
 targetsCb.type = 'checkbox'
+targetsCb.checked = true
 targetsCb.onchange = () => {
   for (const id of ['targets-layer', 'anim-paths-layer']) {
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', targetsCb.checked ? 'visible' : 'none')
