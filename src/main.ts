@@ -73,7 +73,11 @@ map.on('moveend', () => {
 
 // --- vehicle markers (line-labeled badges) ---
 const markers = new Map<string, Marker>()
+/** Active line-name filter (empty = all lines). */
 const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
+/** Active line-name filter (empty = all lines). */
+let lineFilter = new Set(['M10', 'U8'])
+const visibleVehicles = () => filterVehicles(vehicles, filters, lineFilter)
 let vehicles: Vehicle[] = []
 let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
@@ -88,7 +92,7 @@ let lineShapes: LineShapes = {}
 const statusEl = document.getElementById('statusbar')!
 function updateStatus() {
   const ago = lastUpdate ? Math.round((Date.now() - lastUpdate) / 1000) : 0
-  const count = vehicles.filter(v => filters[v.product]).length
+  const count = visibleVehicles().length
   statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago`
 }
 setInterval(updateStatus, 1000)
@@ -146,7 +150,7 @@ function updateSegment(v: Vehicle, m: Marker) {
 }
 
 function render() {
-  const visible = filterVehicles(vehicles, filters)
+  const visible = visibleVehicles()
   const seen = new Set<string>()
   for (const v of visible) {
     seen.add(v.id)
@@ -374,7 +378,23 @@ modeRow.className = 'mode'
   label.append(cb, ` ${PRODUCT_LABELS[p]}`, ` <span style="color:${PRODUCT_COLORS[p]}">●</span>`)
   modeRow.append(label)
 })
-filterEl.append(modeRow)
+// Line-name filter: comma/space-separated, empty = all lines
+const parseLines = (s: string): Set<string> =>
+  new Set(s.split(/[,;\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean))
+const lineInput = document.createElement('input')
+lineInput.type = 'text'
+lineInput.value = 'M10, U8'
+lineInput.placeholder = 'lines, e.g. M10, U8 (empty = all)'
+lineInput.oninput = () => {
+  lineFilter = parseLines(lineInput.value)
+  render()
+}
+const lineRow = document.createElement('div')
+lineRow.className = 'mode'
+const lineLabel = document.createElement('label')
+lineLabel.append('Lines:')
+lineRow.append(lineLabel, lineInput)
+filterEl.append(lineRow)
 
 const toggleLayer = (layerId: string, name: string) => {
   const label = document.createElement('label')

@@ -103,6 +103,20 @@ describe('filterVehicles', () => {
     const out = filterVehicles([v('suburban'), v('subway'), v('tram')], {suburban: true, subway: false, tram: true})
     expect(out.map(x => x.product)).toEqual(['suburban', 'tram'])
   })
+  it('keeps only the listed lines when a line filter is given', () => {
+    const vs = [v('tram'), v('subway')]
+    vs[0].line = 'M10'
+    vs[1].line = 'U8'
+    const out = filterVehicles(vs, {suburban: true, subway: true, tram: true}, new Set(['M10']))
+    expect(out.map(x => x.line)).toEqual(['M10'])
+  })
+  it('keeps everything when the line filter is empty', () => {
+    const vs = [v('tram'), v('subway')]
+    vs[0].line = 'M10'
+    vs[1].line = 'U8'
+    const out = filterVehicles(vs, {suburban: true, subway: true, tram: true}, new Set())
+    expect(out.length).toBe(2)
+  })
 })
 
 describe('line-name product gate', () => {

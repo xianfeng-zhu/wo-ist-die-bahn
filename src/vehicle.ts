@@ -27,8 +27,9 @@ const LINE_PATTERNS: Record<Product, RegExp> = {
 
 export type Filters = Record<Product, boolean>
 
-export function filterVehicles(vehicles: Vehicle[], filters: Filters): Vehicle[] {
-  return vehicles.filter(v => filters[v.product])
+/** Product + optional line-name filter (empty/omitted lines = all). */
+export function filterVehicles(vehicles: Vehicle[], filters: Filters, lines?: ReadonlySet<string>): Vehicle[] {
+  return vehicles.filter(v => filters[v.product] && (!lines || lines.size === 0 || lines.has(v.line)))
 }
 
 export function productFromCls(cls: number | undefined): Product | null {

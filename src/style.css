@@ -11,6 +11,7 @@ body { font: 13px system-ui, sans-serif; }
   box-shadow: 0 1px 4px rgba(0,0,0,.3);
 }
 #filters .mode { display: flex; gap: 6px; margin-bottom: 6px; }
+#filters .mode input[type='text'] { width: 90px; font: 12px system-ui; padding: 1px 4px; border: 1px solid #999; border-radius: 3px; }
 #filters .layer { display: block; margin: 2px 0; cursor: pointer; }
 #attribution {
   position: fixed; bottom: 4px; left: 6px; z-index: 1000;
