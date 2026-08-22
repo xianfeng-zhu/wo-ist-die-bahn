@@ -292,6 +292,7 @@ async function loadNetworkLayers() {
       id: 'stations-layer',
       type: 'circle',
       source: 'stations',
+            layout: {visibility: 'none'},
       paint: {'circle-radius': 3, 'circle-color': '#888', 'circle-stroke-color': '#555', 'circle-stroke-width': 1}
     })
     map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
@@ -326,6 +327,7 @@ async function loadNetworkLayers() {
       id: 'routes-layer',
       type: 'line',
       source: 'routes',
+            layout: {visibility: 'none'},
       paint: {'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.75}
     })
   } catch (err) {
