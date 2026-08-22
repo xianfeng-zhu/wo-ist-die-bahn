@@ -283,29 +283,30 @@ function updateTargetsFeatures() {
   src?.setData({type: 'FeatureCollection', features})
 }
 
-// --- station + route layers (GeoJSON, toggleable) ---
+// --- track shapes only (stations/routes RENDERING commented out for testing) ---
 async function loadNetworkLayers() {
-  try {
-    const stations = await (await fetch('/stations.json')).json()
-    map.addSource('stations', {type: 'geojson', data: stations})
-    map.addLayer({
-      id: 'stations-layer',
-      type: 'circle',
-      source: 'stations',
-            layout: {visibility: 'none'},
-      paint: {'circle-radius': 3, 'circle-color': '#888', 'circle-stroke-color': '#555', 'circle-stroke-width': 1}
-    })
-    map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
-      const name = e.features?.[0]?.properties?.name
-      if (name) {
-        new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
-      }
-    })
-    map.on('mouseenter', 'stations-layer', () => { map.getCanvas().style.cursor = 'pointer' })
-    map.on('mouseleave', 'stations-layer', () => { map.getCanvas().style.cursor = '' })
-  } catch (err) {
-    console.warn('stations layer unavailable', err)
-  }
+  // TESTING: stations layer disabled — only targets render
+  // try {
+  //   const stations = await (await fetch('/stations.json')).json()
+  //   map.addSource('stations', {type: 'geojson', data: stations})
+  //   map.addLayer({
+  //     id: 'stations-layer',
+  //     type: 'circle',
+  //     source: 'stations',
+  //     layout: {visibility: 'none'},
+  //     paint: {'circle-radius': 3, 'circle-color': '#888', 'circle-stroke-color': '#555', 'circle-stroke-width': 1}
+  //   })
+  //   map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
+  //     const name = e.features?.[0]?.properties?.name
+  //     if (name) {
+  //       new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
+  //     }
+  //   })
+  //   map.on('mouseenter', 'stations-layer', () => { map.getCanvas().style.cursor = 'pointer' })
+  //   map.on('mouseleave', 'stations-layer', () => { map.getCanvas().style.cursor = '' })
+  // } catch (err) {
+  //   console.warn('stations layer unavailable', err)
+  // }
   try {
     const routes = await (await fetch('/routes.json')).json()
     lineShapes = {}
@@ -317,19 +318,20 @@ async function loadNetworkLayers() {
         lineShapes[line] = coords.map((c: [number, number]) => [c[1], c[0]])
       }
     }
-    for (const f of routes.features ?? []) {
-      const line = f.properties?.line
-      const product = f.properties?.product as Product | undefined
-      f.properties = {...f.properties, color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'}
-    }
-    map.addSource('routes', {type: 'geojson', data: routes})
-    map.addLayer({
-      id: 'routes-layer',
-      type: 'line',
-      source: 'routes',
-            layout: {visibility: 'none'},
-      paint: {'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.75}
-    })
+    // TESTING: routes layer disabled — only targets render
+    // for (const f of routes.features ?? []) {
+    //   const line = f.properties?.line
+    //   const product = f.properties?.product as Product | undefined
+    //   f.properties = {...f.properties, color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'}
+    // }
+    // map.addSource('routes', {type: 'geojson', data: routes})
+    // map.addLayer({
+    //   id: 'routes-layer',
+    //   type: 'line',
+    //   source: 'routes',
+    //   layout: {visibility: 'none'},
+    //   paint: {'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.75}
+    // })
   } catch (err) {
     console.warn('routes layer unavailable', err)
   }
@@ -410,8 +412,9 @@ const toggleLayer = (layerId: string, name: string) => {
   label.append(cb, ` ${name}`)
   filterEl.append(label)
 }
-toggleLayer('stations-layer', 'Stations')
-toggleLayer('routes-layer', 'Routes')
+// TESTING: stations/routes layers disabled — only targets render
+// toggleLayer('stations-layer', 'Stations')
+// toggleLayer('routes-layer', 'Routes')
 
 // Targets: next-stop dots + animated segment paths (debug/test view)
 const targetsLabel = document.createElement('label')
