@@ -40,6 +40,8 @@ export interface AnimState {
   renderPos?: [number, number]
   /** True while `renderPos` still trails the computed position (see stepTowards). */
   correcting?: boolean
+  /** Last direction the badge actually moved, so it can never be dragged back. */
+  heading?: [number, number]
 }
 
 /**
@@ -84,6 +86,59 @@ export function stepTowards(from: [number, number], to: [number, number], dtMs: 
   if (gap === 0 || gap <= budget) return to
   const f = budget / gap
   return [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f]
+}
+
+/**
+ * Move `from` toward `to`, but never against `heading`.
+ *
+ * `stepTowards` has no sense of direction: when a poll corrects a badge to a
+ * position BEHIND it, easing there drags it backwards. `drawnAlong` keeps
+ * progress monotonic along one path, but a path swap re-projects the position,
+ * so the guarantee has to be repeated here in position space. Holding until the
+ * correction moves ahead reads as a pause; reversing reads as a bug.
+ */
+export function forwardStep(
+  from: [number, number],
+  to: [number, number],
+  heading: [number, number] | null,
+  dtMs: number
+): [number, number] {
+  const next = stepTowards(from, to, dtMs)
+  if (!heading) return next
+  const move: [number, number] = [next[0] - from[0], next[1] - from[1]]
+  return heading[0] * move[0] + heading[1] * move[1] < 0 ? from : next
+}
+
+/** Distance in metres along a path of lat/lon points. */
+export function pathMetres(path: Array<[number, number]>): number {
+  let total = 0
+  for (let i = 1; i < path.length; i++) total += metresBetween(path[i - 1], path[i])
+  return total
+}
+
+/**
+ * Fastest a Berlin S-Bahn, U-Bahn or tram plausibly runs (45 m/s = 162 km/h,
+ * comfortably above the S-Bahn's 100 km/h). If a track implies more than this
+ * over the forecast, the track is wrong for this vehicle — usually a shape that
+ * fits within tolerance but takes a much longer way round, or a ring line where
+ * projection wraps to the far side.
+ */
+export const SPEED_SANITY_MPS = 45
+
+/**
+ * Speed the forecast implies along `path`, in m/s. Returns 0 when it cannot be
+ * determined. `alongs`/`total` are in the degree units `projectOntoPath` uses,
+ * so the fraction is converted through the path's true length.
+ */
+export function impliedSpeed(
+  ms: number[], alongs: number[], total: number, path: Array<[number, number]>
+): number {
+  const n = Math.min(ms.length, alongs.length)
+  if (n < 2 || total <= 0) return 0
+  const seconds = (ms[n - 1] - ms[0]) / 1000
+  if (seconds <= 0) return 0
+  const fraction = (alongs[n - 1] - alongs[0]) / total
+  return (fraction * pathMetres(path)) / seconds
 }
 
 /**

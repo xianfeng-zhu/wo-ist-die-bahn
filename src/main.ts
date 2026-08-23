@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAlong, AnimState, metresBetween, pointAlongPath, projectOntoPath, slicePath, stepTowards} from './motion.js'
+import {advanceAlong, AnimState, forwardStep, impliedSpeed, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
 import type {FrameEntry} from './recorder.js'
@@ -215,10 +215,18 @@ function updateSegment(v: Vehicle, m: Marker) {
   // keeps one shape per line (the longest), so branch variants (S1, M5, tram 12)
   // do not match and projection would snap kilometres away. When it doesn't fit,
   // follow the operator's own forecast points instead of a wrong track.
-  if (maxResidualM(path, f.pts) > SHAPE_FIT_LIMIT_M) {
-    // Wrong track. Follow the forecast points, then continue straight to the
-    // target: the forecast alone only spans ~30 s, so a path that stopped there
-    // would strand the vehicle short of its stop.
+  const badFit = () => maxResidualM(path, f.pts) > SHAPE_FIT_LIMIT_M
+  const tooFast = () => {
+    const a = alongsOnPath(path, f.pts)
+    const t = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
+    return impliedSpeed(f.ms, a, t, path) > SPEED_SANITY_MPS
+  }
+  if (badFit() || tooFast()) {
+    // Wrong track: either the forecast does not lie on it, or following it
+    // would need an impossible speed (a shape that takes the long way round, or
+    // a ring line where projection wraps). Follow the forecast points, then
+    // continue straight to the target: the forecast alone spans only ~30 s, so a
+    // path that stopped there would strand the vehicle short of its stop.
     const last = f.pts[f.pts.length - 1]
     const to: [number, number] = [target.lat, target.lon]
     path = metresBetween(last, to) > 25 ? [...f.pts, to] : [...f.pts]
@@ -234,6 +242,7 @@ function updateSegment(v: Vehicle, m: Marker) {
     drawnAlong,
     drawnT: Date.now(),
     renderPos: prev?.renderPos, // keep what is on screen; frame() glides to the fix
+    heading: prev?.heading,     // and keep its direction, so it is never dragged back
     reportT: Date.now(),
     ms: f.ms,
     alongs,
@@ -286,7 +295,11 @@ function frame(rafNow: number) {
       s.drawnAlong = along
       s.drawnT = now
       const target = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
-      s.renderPos = s.renderPos ? stepTowards(s.renderPos, target, dtMs) : target
+      const from = s.renderPos
+      s.renderPos = from ? forwardStep(from, target, s.heading ?? null, dtMs) : target
+      if (from && metresBetween(from, s.renderPos) >= 0.3) {
+        s.heading = [s.renderPos[0] - from[0], s.renderPos[1] - from[1]]
+      }
       // still short of the computed position => the limiter is correcting
       s.correcting = metresBetween(s.renderPos, target) > 1e-9
       m.setLngLat([s.renderPos[1], s.renderPos[0]])

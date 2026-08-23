@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, metresBetween, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, impliedSpeed, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -97,6 +97,64 @@ describe('stepTowards', () => {
 
   it('does not move for a zero-length frame', () => {
     expect(stepTowards(berlin, [52.53, 13.42], 0)).toEqual(berlin)
+  })
+})
+
+describe('forwardStep', () => {
+  const p0: [number, number] = [52.52, 13.405]
+  const north = (m: number): [number, number] => [52.52 + m / 111320, 13.405]
+
+  it('moves forward when the target is ahead', () => {
+    const next = forwardStep(p0, north(0.4), [1, 0], 16)
+    expect(next[0]).toBeGreaterThan(p0[0])
+  })
+
+  it('holds instead of reversing when the target is behind', () => {
+    // a poll corrected this badge backwards; it must not be dragged back
+    expect(forwardStep(north(10), north(4), [1, 0], 16)).toEqual(north(10))
+  })
+
+  it('moves freely when no heading is known yet', () => {
+    const next = forwardStep(north(10), north(4), null, 16)
+    expect(next[0]).toBeLessThan(north(10)[0])
+  })
+
+  it('still rate-limits a forward correction', () => {
+    const far = north(4000)
+    expect(metresBetween(north(0), forwardStep(north(0), far, [1, 0], 16))).toBeLessThanOrEqual(CATCHUP_MAX_STEP + 1e-6)
+  })
+})
+
+describe('pathMetres', () => {
+  it('sums the length of a path', () => {
+    expect(pathMetres([[52.52, 13.405], [52.52 + 100 / 111320, 13.405]])).toBeCloseTo(100, 0)
+  })
+  it('is zero for a path with fewer than two points', () => {
+    expect(pathMetres([[52.52, 13.405]])).toBe(0)
+  })
+})
+
+describe('impliedSpeed', () => {
+  // a straight 1000 m path, in the degree units projectOntoPath works in
+  const path: Array<[number, number]> = [[52.5, 13.4], [52.5 + 1000 / 111320, 13.4]]
+  const total = 1000 / 111320
+
+  it('computes the speed the forecast implies along a path', () => {
+    // covers the whole 1000 m over the 30 s forecast => 33 m/s
+    expect(impliedSpeed([0, 30000], [0, total], total, path)).toBeCloseTo(33.3, 0)
+  })
+
+  it('flags a track that would need an impossible speed', () => {
+    // same 30 s but the projection spans 3 km of track
+    const long: Array<[number, number]> = [[52.5, 13.4], [52.5 + 3000 / 111320, 13.4]]
+    const t = 3000 / 111320
+    expect(impliedSpeed([0, 30000], [0, t], t, long)).toBeGreaterThan(SPEED_SANITY_MPS)
+  })
+
+  it('returns 0 when it cannot be determined', () => {
+    expect(impliedSpeed([], [], total, path)).toBe(0)
+    expect(impliedSpeed([0, 30000], [0, total], 0, path)).toBe(0)
+    expect(impliedSpeed([0, 0], [0, total], total, path)).toBe(0)
   })
 })
 

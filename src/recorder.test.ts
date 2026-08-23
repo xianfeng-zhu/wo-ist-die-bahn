@@ -106,6 +106,15 @@ describe('MotionRecorder', () => {
     expect(r.events.filter(x => x.kind === 'overspeed')).toEqual([])
   })
 
+  it('does not count distance covered while correcting as speed', () => {
+    const r = new MotionRecorder(1000)
+    const e = (pos: [number, number], correcting: boolean): FrameEntry[] =>
+      [{id: 'v1', line: 'U6', pos, atTarget: false, correcting}]
+    // 60 m/s sustained for 14 s, but every frame is a correction
+    for (let i = 0; i <= 466; i++) r.frame(1000 + i * 30, e(north(i * 1.8), true))
+    expect(r.events.filter(x => x.kind === 'overspeed')).toEqual([])
+  })
+
   it('reports speed that is sustained across the window', () => {
     const r = new MotionRecorder(1000)
     const e = (pos: [number, number]): FrameEntry[] => [{id: 'v1', line: 'U8', pos, atTarget: false}]

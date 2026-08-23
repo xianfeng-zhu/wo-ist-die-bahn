@@ -155,8 +155,12 @@ export class MotionRecorder {
         this.maxStep = Math.max(this.maxStep, c.metres)
         if (c.jump) this.events.push({t: now, id: e.id, line: e.line, kind: 'jump', metres: +c.metres.toFixed(1), at: e.target})
         if (c.reversal) this.events.push({t: now, id: e.id, line: e.line, kind: 'reversal', metres: +c.metres.toFixed(1), at: e.target})
-        // sustained speed over a window, not this frame's speed
-        const cum = prev.cum + c.metres
+        // Sustained speed over a window, not this frame's speed — and only of
+        // forecast-driven motion. Distance covered while correcting belongs to
+        // the `correction` events, not to the vehicle's speed; counting it made
+        // a vehicle with 119 m of corrections in 24 s look like it ran at
+        // 179 km/h.
+        const cum = prev.cum + (e.correcting ? 0 : c.metres)
         const hist = prev.hist
         hist.push([now, cum])
         const windowMs = MOTION_LIMITS.speedWindowSec * 1000
