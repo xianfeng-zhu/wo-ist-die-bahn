@@ -38,6 +38,8 @@ export interface AnimState {
    * corrected position is glided to rather than snapped to (see stepTowards).
    */
   renderPos?: [number, number]
+  /** True while `renderPos` still trails the computed position (see stepTowards). */
+  correcting?: boolean
 }
 
 /**

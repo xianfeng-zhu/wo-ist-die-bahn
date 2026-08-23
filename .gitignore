@@ -7,3 +7,4 @@ dist/
 .superpowers/
 .playwright-mcp/
 review-screenshots/
+logs/

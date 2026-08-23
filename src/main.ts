@@ -6,6 +6,8 @@ import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {advanceAlong, AnimState, metresBetween, pointAlongPath, projectOntoPath, slicePath, stepTowards} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
+import {MotionRecorder} from './recorder.js'
+import type {FrameEntry} from './recorder.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
 // the module; Vite doesn't emit it, so point it at the copy we ship in
@@ -117,6 +119,11 @@ function logError(msg: string) {
 }
 window.addEventListener('error', e => logError(`uncaught: ${e.message}`))
 window.addEventListener('unhandledrejection', e => logError(`unhandled rejection: ${e.reason}`))
+
+// --- motion recorder (debug): logs what the map DRAWS, for offline analysis ---
+// ?traceHz=N sets the position-sample rate (detection always runs every frame).
+const TRACE_HZ = Number(new URLSearchParams(location.search).get('traceHz')) || 5
+let recorder: MotionRecorder | null = null
 
 const statusEl = document.getElementById('statusbar')!
 function updateStatus() {
@@ -280,7 +287,19 @@ function frame(rafNow: number) {
       s.drawnT = now
       const target = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
       s.renderPos = s.renderPos ? stepTowards(s.renderPos, target, dtMs) : target
+      // still short of the computed position => the limiter is correcting
+      s.correcting = metresBetween(s.renderPos, target) > 1e-9
       m.setLngLat([s.renderPos[1], s.renderPos[0]])
+    }
+    if (recorder) {
+      const entries: FrameEntry[] = []
+      for (const v of vehicles) {
+        const s = animStates.get(v.id)
+        if (s?.renderPos) entries.push({id: v.id, line: v.line, pos: s.renderPos,
+          atTarget: s.total > 0 && s.drawnAlong >= s.total - 1e-9, target: s.endName,
+          correcting: s.correcting})
+      }
+      recorder.frame(now, entries)
     }
     // refresh the current-position → target paths a few times per second
     if (rafNow - lastPathsUpdate > 500) {
@@ -427,6 +446,11 @@ async function poll() {
     failures = 0
     nextDelay = POLL_INTERVAL_MS
     conn = 'live'
+    if (recorder) {
+      const drawn = new Map<string, [number, number]>()
+      for (const [id, s] of animStates) if (s.renderPos) drawn.set(id, s.renderPos)
+      recorder.poll(drawn, new Map(vehicles.map(v => [v.id, [v.lat, v.lon] as [number, number]])))
+    }
     render()
   } catch (err) {
     failures++
@@ -559,6 +583,49 @@ document.body.classList.toggle('show-vids', idsCb.checked)
 idsLabel.append(idsCb, ' IDs')
 filterEl.append(idsLabel)
 
+// --- motion recording controls (debug view) ---
+const recRow = document.createElement('div')
+recRow.className = 'mode'
+const recLabel = document.createElement('label')
+recLabel.className = 'layer'
+const recCb = document.createElement('input')
+recCb.type = 'checkbox'
+const recStatus = document.createElement('span')
+recStatus.className = 'rec-status'
+const saveBtn = document.createElement('button')
+saveBtn.type = 'button'
+saveBtn.textContent = 'Save log'
+saveBtn.disabled = true
+
+function saveRecording() {
+  if (!recorder) return
+  const blob = new Blob([recorder.toNdjson(Date.now())], {type: 'application/x-ndjson'})
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `motion-${new Date(recorder.startedAt).toISOString().replace(/[:.]/g, '-')}.ndjson`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+saveBtn.onclick = saveRecording
+
+recCb.onchange = () => {
+  if (recCb.checked) {
+    recorder = new MotionRecorder(Date.now(), Math.round(1000 / TRACE_HZ))
+    saveBtn.disabled = false
+  }
+  recStatus.textContent = recCb.checked ? ' recording…' : ' stopped'
+}
+setInterval(() => {
+  if (!recorder || !recCb.checked) return
+  const s = recorder.summary(Date.now())
+  const faults = (s.events.jump ?? 0) + (s.events.reversal ?? 0) + (s.events.overspeed ?? 0) + (s.events.freeze ?? 0)
+  recStatus.textContent = ` ${s.seconds}s · ${s.vehiclesSeen} veh · ${faults} faults`
+}, 1000)
+
+recLabel.append(recCb, ' Record motion', recStatus)
+recRow.append(recLabel, saveBtn)
+filterEl.append(recRow)
+
 /**
  * Debug handle for headless checks (console capture is unreliable — see
  * AGENTS.md). Read-only by convention; `byId` takes a full jid or a shortId.
@@ -569,6 +636,11 @@ filterEl.append(idsLabel)
   get vehicles() { return vehicles },
   get lineShapes() { return lineShapes },
   get logs() { return logs },
+  get recorder() { return recorder },
+  startRecording: (hz = TRACE_HZ) => { recorder = new MotionRecorder(Date.now(), Math.round(1000 / hz))
+    recCb.checked = true; saveBtn.disabled = false; return true },
+  stopRecording: () => { recCb.checked = false; return recorder?.summary(Date.now()) ?? null },
+  saveRecording,
   byId: (q: string) => {
     const v = vehicles.find(x => x.id === q || shortId(x.id) === q)
     return v ? {vehicle: v, anim: animStates.get(v.id)} : null
