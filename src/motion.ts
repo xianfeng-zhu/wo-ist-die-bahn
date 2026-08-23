@@ -24,6 +24,30 @@ export interface AnimState {
   path: Array<[number, number]>
   /** Line name (used to slice the track for the current segment). */
   line?: string
+  /**
+   * Highest distance along `path` already drawn. Motion is forward-only: each
+   * poll re-anchors on the reported position, which can sit slightly BEHIND
+   * what we had extrapolated, and snapping back reads as the vehicle reversing.
+   * Hold instead until the forecast catches up.
+   */
+  drawnAlong: number
+}
+
+/**
+ * How long to keep coasting after the forecast's last sample. Covers a late
+ * poll without inventing minutes of movement: once data stops arriving the
+ * vehicle stops too, rather than gliding off on a stale prediction.
+ */
+export const COAST_GRACE_MS = 5000
+
+/**
+ * Distance along `state.path` to draw at `nowMs`. Forward-only (never less than
+ * `state.drawnAlong`) and bounded by `COAST_GRACE_MS` past the forecast.
+ */
+export function advanceAlong(state: AnimState, nowMs: number): number {
+  const lastMs = state.ms.length > 0 ? state.ms[state.ms.length - 1] : 0
+  const elapsed = Math.min(nowMs - state.reportT, lastMs + COAST_GRACE_MS)
+  return Math.max(state.drawnAlong, alongAt(state.ms, state.alongs, elapsed, state.total))
 }
 
 /**

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {alongAt, berlinEpoch, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, COAST_GRACE_MS, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -52,6 +52,51 @@ describe('berlinEpoch', () => {
   })
   it('converts a winter (CET, UTC+1) wall-clock time to epoch', () => {
     expect(berlinEpoch('20260115', '233000')).toBe(Date.UTC(2026, 0, 15, 22, 30, 0))
+  })
+})
+
+describe('advanceAlong', () => {
+  const base = {
+    reportT: 1_000_000,
+    ms: [0, 10000, 20000, 30000],
+    alongs: [0, 100, 300, 600],
+    total: 1000,
+    drawnAlong: 0,
+    start: {lat: 0, lon: 0},
+    end: {lat: 0, lon: 1},
+    path: [[0, 0], [0, 1]] as Array<[number, number]>
+  }
+
+  it('follows the forecast while it lasts', () => {
+    expect(advanceAlong(base, base.reportT + 15000)).toBeCloseTo(200, 6)
+  })
+
+  it('never draws behind what it has already drawn', () => {
+    // a fresh poll re-anchors at 0 while 250 was already drawn: hold, never reverse
+    expect(advanceAlong({...base, drawnAlong: 250}, base.reportT)).toBe(250)
+    expect(advanceAlong({...base, drawnAlong: 250}, base.reportT + 5000)).toBe(250)
+  })
+
+  it('resumes moving once the forecast passes the drawn position', () => {
+    const held = advanceAlong({...base, drawnAlong: 250}, base.reportT + 15000)
+    expect(held).toBe(250) // forecast is at 200, still behind
+    const past = advanceAlong({...base, drawnAlong: 250}, base.reportT + 18000)
+    expect(past).toBeGreaterThan(250) // forecast at 260, now leads
+  })
+
+  it('stops coasting once the grace period after the forecast expires', () => {
+    const atLimit = advanceAlong(base, base.reportT + 30000 + COAST_GRACE_MS)
+    const wayLater = advanceAlong(base, base.reportT + 30000 + COAST_GRACE_MS + 600000)
+    expect(wayLater).toBe(atLimit)
+    expect(wayLater).toBeLessThan(base.total) // did NOT glide to the end of the track
+  })
+
+  it('coasts during the grace period so a late poll does not freeze it', () => {
+    expect(advanceAlong(base, base.reportT + 32000)).toBeGreaterThan(600)
+  })
+
+  it('handles an empty forecast without moving', () => {
+    expect(advanceAlong({...base, ms: [], alongs: []}, base.reportT + 99000)).toBe(0)
   })
 })
 

@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {alongAt, AnimState, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, AnimState, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
@@ -15,8 +15,12 @@ setWorkerUrl('/maplibre-gl-worker.mjs')
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
 const POLL_INTERVAL_MS = 10000 // matches the official VBB livemap (Livemap.timeout = 10)
 const MAX_BACKOFF_MS = 60000
-// ?all=1 shows every returned vehicle (incl. FEX etc.) for testing the animation
+// ?all=1 shows every returned vehicle (incl. FEX, bus) for testing the animation.
+// The product mask has to widen too: mask 7 excludes them server-side, so
+// relaxing only the client-side name gate would change nothing.
 const TEST_ALL = new URLSearchParams(location.search).has('all')
+const RAIL_ONLY = 7
+const EVERY_PRODUCT = 1023
 
 const PRODUCT_COLORS: Record<Product, string> = {suburban: '#2e7d32', subway: '#1565c0', tram: '#c62828'}
 const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram'}
@@ -50,7 +54,7 @@ const map = new GLMap({
         tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
         tileSize: 256,
         maxzoom: 19,
-        attribution: '&copy; OpenStreetMap contributors'
+        attribution: 'Live data: VBB &middot; &copy; OpenStreetMap contributors'
       }
     },
     layers: [{id: 'osm', type: 'raster', source: 'osm'}]
@@ -60,6 +64,17 @@ const map = new GLMap({
   maxZoom: 19
 })
 
+
+// MapLibre tracks window resize, but not a container that changes size on its
+// own (devtools docking, split view, DPR change on monitor switch).
+new ResizeObserver(() => map.resize()).observe(map.getContainer())
+
+// Below this zoom, badges outnumber the space for them: 38% overlapped at z12
+// with labels on. The official VBB livemap hides labels under z13 too.
+const LABEL_MIN_ZOOM = 13
+const applyZoomClass = () => document.body.classList.toggle('dense', map.getZoom() < LABEL_MIN_ZOOM)
+map.on('zoom', applyZoomClass)
+applyZoomClass()
 
 map.on('moveend', () => {
   const c = map.getCenter()
@@ -89,11 +104,26 @@ let conn: 'live' | 'stale' | 'offline' = 'offline'
 const animStates = new Map<string, AnimState>()
 let lineShapes: LineShapes = {}
 
+// --- error log (debug view): visible in-page and readable via __lb.logs ---
+const logEl = document.getElementById('debuglog')!
+const logs: Array<{at: string; msg: string}> = []
+function logError(msg: string) {
+  const at = new Date().toTimeString().slice(0, 8)
+  logs.push({at, msg})
+  if (logs.length > 50) logs.shift()
+  console.warn('[liveberlin]', msg)
+  logEl.hidden = false
+  logEl.textContent = logs.slice(-8).map(l => `${l.at}  ${l.msg}`).join('\n')
+}
+window.addEventListener('error', e => logError(`uncaught: ${e.message}`))
+window.addEventListener('unhandledrejection', e => logError(`unhandled rejection: ${e.reason}`))
+
 const statusEl = document.getElementById('statusbar')!
 function updateStatus() {
   const ago = lastUpdate ? Math.round((Date.now() - lastUpdate) / 1000) : 0
   const count = visibleVehicles().length
   statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago`
+  statusEl.dataset.state = conn
 }
 setInterval(updateStatus, 1000)
 
@@ -115,7 +145,9 @@ function badgeElement(v: Vehicle): HTMLElement {
 
 function popupHtml(v: Vehicle): string {
   return (
-    `<b>${v.line}</b> ${PRODUCT_LABELS[v.product]}<br>→ ${v.direction}<br>next: ${v.nextStop ?? '—'}` +
+    // toStop is what HAFAS declares; nextStop is inferred from times and picks
+    // the terminus when the real next stop's time has just passed
+    `<b>${v.line}</b> ${PRODUCT_LABELS[v.product]}<br>→ ${v.direction}<br>next: ${v.toStop?.name ?? v.nextStop ?? '—'}` +
     (v.delayMs != null
       ? `<br><span style="color:${v.delayMs >= 300000 ? '#c62828' : '#333'}">delay: ${Math.round(v.delayMs / 60000)} min</span>`
       : '') +
@@ -124,19 +156,24 @@ function popupHtml(v: Vehicle): string {
 }
 
 /**
- * Furthest a forecast point may sit from the chosen track before we treat the
- * track as the wrong one. Degrees (the units `projectOntoPath` works in), so
- * roughly 170 m north-south and 100 m east-west at Berlin's latitude — far
- * above real track-vs-shape noise, far below a branch mismatch (2 km+).
+ * Furthest (metres) a forecast point may sit from the chosen track before we
+ * treat the track as the wrong one.
+ *
+ * Measured over 259 vehicles the residual is bimodal: real noise between the
+ * decimated GTFS shape and the track runs to ~100 m (a whole line is capped at
+ * 500 points), while branch mismatches start at ~300 m and reach 6.5 km. 250 m
+ * sits in the empty valley between them. A tighter limit put ~46 vehicles on
+ * the boundary, flipping path source between polls and jolting the marker.
  */
-const SHAPE_FIT_LIMIT = 0.0015
+const SHAPE_FIT_LIMIT_M = 250
 
-const maxResidual = (path: Array<[number, number]>, pts: Array<[number, number]>): number => {
+/** Metres between two lat/lon points (local flat approximation). */
+const metres = (a: [number, number], b: [number, number]): number =>
+  Math.hypot((a[0] - b[0]) * 111320, (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180))
+
+const maxResidualM = (path: Array<[number, number]>, pts: Array<[number, number]>): number => {
   let worst = 0
-  for (const [lat, lon] of pts) {
-    const p = projectOntoPath(path, {lat, lon}).point
-    worst = Math.max(worst, Math.hypot(p[0] - lat, p[1] - lon))
-  }
+  for (const pt of pts) worst = Math.max(worst, metres(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
   return worst
 }
 
@@ -175,13 +212,23 @@ function updateSegment(v: Vehicle, m: Marker) {
   // keeps one shape per line (the longest), so branch variants (S1, M5, tram 12)
   // do not match and projection would snap kilometres away. When it doesn't fit,
   // follow the operator's own forecast points instead of a wrong track.
-  let alongs = alongsOnPath(path, f.pts)
-  if (maxResidual(path, f.pts) > SHAPE_FIT_LIMIT) {
-    path = f.pts
-    alongs = alongsOnPath(path, f.pts)
+  if (maxResidualM(path, f.pts) > SHAPE_FIT_LIMIT_M) {
+    // Wrong track. Follow the forecast points, then continue straight to the
+    // target: the forecast alone only spans ~30 s, so a path that stopped there
+    // would strand the vehicle short of its stop.
+    const last = f.pts[f.pts.length - 1]
+    const to: [number, number] = [target.lat, target.lon]
+    path = metres(last, to) > 25 ? [...f.pts, to] : [...f.pts]
   }
+  const alongs = alongsOnPath(path, f.pts)
   const total = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
+  // Carry the on-screen position across the re-anchor. The reported position can
+  // sit behind what we extrapolated; without this the marker visibly reverses.
+  const prev = animStates.get(v.id)
+  const drawn = prev ? pointAlongPath(prev.path, prev.total > 0 ? prev.drawnAlong / prev.total : 0) : null
+  const drawnAlong = drawn ? Math.min(projectOntoPath(path, {lat: drawn[0], lon: drawn[1]}).along, total) : 0
   animStates.set(v.id, {
+    drawnAlong,
     reportT: Date.now(),
     ms: f.ms,
     alongs,
@@ -229,7 +276,8 @@ function frame(rafNow: number) {
     for (const [id, s] of animStates) {
       const m = markers.get(id)
       if (!m) continue
-      const along = alongAt(s.ms, s.alongs, now - s.reportT, s.total)
+      const along = advanceAlong(s, now)
+      s.drawnAlong = along
       const [lat, lon] = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
       m.setLngLat([lon, lat])
     }
@@ -250,6 +298,10 @@ requestAnimationFrame(frame)
 // and path vertices would swallow the target clicks).
 const POINTS_ONLY: FilterSpecification = ['==', '$type', 'Point']
 const LINES_ONLY: FilterSpecification = ['==', '$type', 'LineString']
+// Zoomed out the annotations must stay smaller than the vehicle dots they
+// belong to, or the debug overlay reads as the vehicles.
+const ZOOM_WIDTH = (full: number) =>
+  ['interpolate', ['linear'], ['zoom'], 10, full * 0.35, LABEL_MIN_ZOOM, full] as unknown as number
 function addTargetsLayers() {
   map.addSource('targets', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
   // white casing underneath for contrast on any map background
@@ -258,21 +310,21 @@ function addTargetsLayers() {
     type: 'line',
     source: 'targets',
     filter: LINES_ONLY,
-    paint: {'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9}
+    paint: {'line-color': '#ffffff', 'line-width': ZOOM_WIDTH(7), 'line-opacity': 0.9}
   })
   map.addLayer({
     id: 'anim-paths-layer',
     type: 'line',
     source: 'targets',
     filter: LINES_ONLY,
-    paint: {'line-color': '#ff6d00', 'line-width': 3.5, 'line-opacity': 0.95}
+    paint: {'line-color': '#ff6d00', 'line-width': ZOOM_WIDTH(3.5), 'line-opacity': 0.95}
   })
   map.addLayer({
     id: 'targets-layer',
     type: 'circle',
     source: 'targets',
     filter: POINTS_ONLY,
-    paint: {'circle-radius': 7, 'circle-color': '#ff6d00', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5}
+    paint: {'circle-radius': ZOOM_WIDTH(7), 'circle-color': '#ff6d00', 'circle-stroke-color': '#fff', 'circle-stroke-width': ZOOM_WIDTH(2.5)}
   })
   map.on('click', 'targets-layer', (e: MapLayerMouseEvent) => {
     const name = e.features?.[0]?.properties?.name
@@ -294,8 +346,7 @@ function updateTargetsFeatures() {
       properties: {name: s.endName ?? v.nextStop ?? v.id}
     })
     // path from the vehicle's CURRENT animated position to the target
-    const along = alongAt(s.ms, s.alongs, Date.now() - s.reportT, s.total)
-    const remaining = slicePath(s.path, along, s.total)
+    const remaining = slicePath(s.path, s.drawnAlong, s.total)
     features.push({
       type: 'Feature',
       geometry: {type: 'LineString', coordinates: remaining.map(([lat, lon]) => [lon, lat])},
@@ -356,7 +407,7 @@ async function loadNetworkLayers() {
     //   paint: {'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.75}
     // })
   } catch (err) {
-    console.warn('routes layer unavailable', err)
+    logError(`routes.json unavailable (animation falls back to straight lines): ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 loadNetworkLayers()
@@ -370,7 +421,7 @@ async function poll() {
   const t = setTimeout(() => controller!.abort(), 15000)
   try {
     // ?all=1: include every returned vehicle (e.g. FEX) for animation testing
-    vehicles = await fetchVehicles(BERLIN_BBOX, 2000, controller.signal, !TEST_ALL)
+    vehicles = await fetchVehicles(BERLIN_BBOX, 2000, controller.signal, !TEST_ALL, TEST_ALL ? EVERY_PRODUCT : RAIL_ONLY)
     lastUpdate = Date.now()
     failures = 0
     nextDelay = POLL_INTERVAL_MS
@@ -378,9 +429,10 @@ async function poll() {
     render()
   } catch (err) {
     failures++
-    conn = 'offline'
+    // one hiccup is stale data, not an outage; say so honestly
+    conn = failures >= 3 ? 'offline' : 'stale'
+    logError(`poll failed (${failures}x): ${err instanceof Error ? err.message : String(err)}`)
     nextDelay = Math.min(POLL_INTERVAL_MS * 2 ** failures, MAX_BACKOFF_MS)
-    console.warn('[poll]', err)
   } finally {
     clearTimeout(t)
     setTimeout(() => void poll(), nextDelay)
@@ -479,6 +531,7 @@ filterEl.append(idsLabel)
   animStates,
   get vehicles() { return vehicles },
   get lineShapes() { return lineShapes },
+  get logs() { return logs },
   byId: (q: string) => {
     const v = vehicles.find(x => x.id === q || shortId(x.id) === q)
     return v ? {vehicle: v, anim: animStates.get(v.id)} : null
