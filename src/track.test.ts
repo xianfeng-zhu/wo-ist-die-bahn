@@ -46,6 +46,14 @@ describe('firstStopAhead', () => {
   it('returns -1 when no stop is ahead', () => {
     expect(firstStopAhead({M10: shape}, 'M10', {lat: 29, lon: 0}, stops)).toBe(-1)
   })
+  it('follows the stops order when travel runs against the shape direction', () => {
+    // stops listed southbound (decreasing along) while the shape increases northward
+    const south = [stops[2], stops[1], stops[0]]
+    expect(firstStopAhead({M10: shape}, 'M10', {lat: 20, lon: 0}, south)).toBe(1) // B, not A
+    expect(firstStopAhead({M10: shape}, 'M10', {lat: 5, lon: 0}, south)).toBe(2) // A (past B)
+    expect(firstStopAhead({M10: shape}, 'M10', {lat: 1, lon: 0}, south)).toBe(2) // A still ahead
+    expect(firstStopAhead({M10: shape}, 'M10', {lat: 0, lon: 0}, south)).toBe(-1) // past all
+  })
   it('falls back to the first upcoming stop without a shape', () => {
     expect(firstStopAhead({}, 'M10', {lat: 2, lon: 0}, stops)).toBe(1)
   })

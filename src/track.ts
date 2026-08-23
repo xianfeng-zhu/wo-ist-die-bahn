@@ -4,9 +4,10 @@ import {LatLon, projectOntoPath, slicePath, StopLike} from './motion.js'
 export type LineShapes = Record<string, Array<[number, number]>>
 
 /**
- * Index of the first remaining stop that lies AHEAD of `from` along the
- * line's shape (so a re-anchor never targets a stop already passed). Returns
- * -1 when no stop is ahead (vehicle has passed all known stops).
+ * Index of the first remaining stop that lies AHEAD of `from` in the
+ * vehicle's TRAVEL direction (from the stops list order — HAFAS stopL is
+ * travel-ordered), regardless of the shape's stored direction. Returns -1
+ * when no stop is ahead (vehicle has passed all known stops).
  */
 export function firstStopAhead(
   lineShapes: LineShapes,
@@ -15,14 +16,19 @@ export function firstStopAhead(
   stops: StopLike[]
 ): number {
   const shape = line ? lineShapes[line] : undefined
-  if (shape && shape.length >= 2) {
+  if (shape && shape.length >= 2 && stops.length >= 2) {
     const fromAlong = projectOntoPath(shape, from).along
-    for (let k = 1; k < stops.length; k++) {
-      if (projectOntoPath(shape, stops[k]).along > fromAlong) return k
+    // travel direction on the shape, from the stops order (stops[0] -> stops[1])
+    const dir = Math.sign(projectOntoPath(shape, stops[1]).along - projectOntoPath(shape, stops[0]).along)
+    if (dir !== 0) {
+      for (let k = 1; k < stops.length; k++) {
+        const delta = projectOntoPath(shape, stops[k]).along - fromAlong
+        if (dir > 0 ? delta > 0 : delta < 0) return k
+      }
+      return -1
     }
-    return -1
   }
-  // no shape: assume the first listed upcoming stop is ahead
+  // no shape / degenerate: assume the first listed upcoming stop is ahead
   return stops.length > 1 ? 1 : -1
 }
 

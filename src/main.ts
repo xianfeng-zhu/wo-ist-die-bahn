@@ -76,7 +76,7 @@ const markers = new Map<string, Marker>()
 /** Active line-name filter (empty = all lines). */
 const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
 /** Active line-name filter (empty = all lines). */
-let lineFilter = new Set(['M10', 'U8'])
+let lineFilter = new Set<string>()
 const visibleVehicles = () => filterVehicles(vehicles, filters, lineFilter)
 let vehicles: Vehicle[] = []
 let lastUpdate = 0
@@ -387,7 +387,7 @@ const parseLines = (s: string): Set<string> =>
   new Set(s.split(/[,;\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean))
 const lineInput = document.createElement('input')
 lineInput.type = 'text'
-lineInput.value = 'M10, U8'
+lineInput.value = ''
 lineInput.placeholder = 'lines, e.g. M10, U8 (empty = all)'
 lineInput.oninput = () => {
   lineFilter = parseLines(lineInput.value)
