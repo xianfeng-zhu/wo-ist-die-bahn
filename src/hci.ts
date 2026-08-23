@@ -63,6 +63,7 @@ interface RadarResponse {
       common?: {
         locL?: Array<{name?: string; crd?: {x?: number; y?: number}}>
         prodL?: Array<{name?: string; cls?: number}>
+        polyL?: Array<{crdEncYX?: string}>
       }
       jnyL?: Journey[]
     }
@@ -75,7 +76,8 @@ export function parseRadar(json: unknown, nowTime: string, strictName = true): V
   const res = svc.res ?? {}
   const common = {
     locs: res.common?.locL ?? [],
-    prods: res.common?.prodL ?? []
+    prods: res.common?.prodL ?? [],
+    polys: res.common?.polyL ?? []
   }
   return (res.jnyL ?? [])
     .map((j: Journey) => transformJourney(j, common, nowTime, strictName))

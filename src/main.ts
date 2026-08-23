@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAnimation, AnimState, pointAlongPath, projectOntoPath, slicePath, timeDiffMs} from './motion.js'
+import {alongAt, AnimState, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
@@ -13,7 +13,7 @@ import {buildSegmentPath, LineShapes} from './track.js'
 setWorkerUrl('/maplibre-gl-worker.mjs')
 
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
-const POLL_INTERVAL_MS = 20000
+const POLL_INTERVAL_MS = 10000 // matches the official VBB livemap (Livemap.timeout = 10)
 const MAX_BACKOFF_MS = 60000
 // ?all=1 shows every returned vehicle (incl. FEX etc.) for testing the animation
 const TEST_ALL = new URLSearchParams(location.search).has('all')
@@ -82,10 +82,10 @@ let vehicles: Vehicle[] = []
 let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
 
-// --- smooth track-following animation ---
-// speedFactor 1.0 = real-time pace (from realtime stop times); acceleration
-// limits smooth out all speed changes (data updates, pauses, factor changes)
-const ANIM = {speedFactor: 1, maxAccel: 0.01, maxDecel: 0.01}
+// --- forecast-driven, track-following animation ---
+// Position comes from the operator's own ~30 s forecast (Vehicle.forecast),
+// projected onto the GTFS track: their timing, our smooth geometry. Nothing
+// here is schedule-paced or invented.
 const animStates = new Map<string, AnimState>()
 let lineShapes: LineShapes = {}
 
@@ -124,32 +124,70 @@ function popupHtml(v: Vehicle): string {
 }
 
 /**
- * (Re)build a vehicle's animation segment from its latest data, continuing from
- * the current animated position (never jumps).
+ * Furthest a forecast point may sit from the chosen track before we treat the
+ * track as the wrong one. Degrees (the units `projectOntoPath` works in), so
+ * roughly 170 m north-south and 100 m east-west at Berlin's latitude — far
+ * above real track-vs-shape noise, far below a branch mismatch (2 km+).
+ */
+const SHAPE_FIT_LIMIT = 0.0015
+
+const maxResidual = (path: Array<[number, number]>, pts: Array<[number, number]>): number => {
+  let worst = 0
+  for (const [lat, lon] of pts) {
+    const p = projectOntoPath(path, {lat, lon}).point
+    worst = Math.max(worst, Math.hypot(p[0] - lat, p[1] - lon))
+  }
+  return worst
+}
+
+/** Forecast points -> distance along `path`, forced non-decreasing so a point
+ *  that projects backwards (a curve doubling back) cannot stall the motion. */
+const alongsOnPath = (path: Array<[number, number]>, pts: Array<[number, number]>): number[] => {
+  const out: number[] = []
+  for (const [lat, lon] of pts) {
+    const a = projectOntoPath(path, {lat, lon}).along
+    out.push(out.length === 0 ? a : Math.max(a, out[out.length - 1]))
+  }
+  return out
+}
+
+/**
+ * (Re)build a vehicle's animation segment from its latest data.
  *
- * The segment is the one HAFAS declares (`fromStop` -> `toStop`); it is never
- * inferred from the stopover list, which is a 4-entry summary whose entries are
- * not adjacent (see Vehicle.stops). Only the track geometry comes from GTFS.
+ * The segment is the one HAFAS declares (`fromStop` -> `toStop`) and the pacing
+ * is the operator's own forecast, snapped onto the GTFS track so curves stay
+ * smooth. We anchor on the reported position rather than the previously drawn
+ * one: being truthful matters more than hiding a small correction, and the
+ * forecast makes the correction small.
  */
 function updateSegment(v: Vehicle, m: Marker) {
-  const prev = animStates.get(v.id)
   const target = v.toStop
-  if (!target || !v.fromStop) {
-    // HAFAS declared no segment: static marker at the polled position
+  const f = v.forecast
+  if (!target || !f || f.pts.length === 0) {
+    // no declared segment or no forecast: static marker at the reported position
     animStates.delete(v.id)
     m.setLngLat([v.lon, v.lat])
     return
   }
-  const from = prev ? pointAlongPath(prev.path, prev.progress) : [v.lat, v.lon]
-  const fromPos = {lat: from[0], lon: from[1]}
-  const path = buildSegmentPath(lineShapes, v.line, fromPos, {lat: target.lat, lon: target.lon})
+  const start = {lat: f.pts[0][0], lon: f.pts[0][1]}
+  let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon})
+  // Does that GTFS track actually pass through the forecast? prepare-data.mjs
+  // keeps one shape per line (the longest), so branch variants (S1, M5, tram 12)
+  // do not match and projection would snap kilometres away. When it doesn't fit,
+  // follow the operator's own forecast points instead of a wrong track.
+  let alongs = alongsOnPath(path, f.pts)
+  if (maxResidual(path, f.pts) > SHAPE_FIT_LIMIT) {
+    path = f.pts
+    alongs = alongsOnPath(path, f.pts)
+  }
+  const total = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
   animStates.set(v.id, {
-    progress: 0,
-    velocity: Math.max(0, prev?.velocity ?? 0), // keep momentum across re-anchors
-    start: fromPos,
+    reportT: Date.now(),
+    ms: f.ms,
+    alongs,
+    total,
+    start,
     end: {lat: target.lat, lon: target.lon},
-    // relative stop-time difference; absolute HAFAS times can lag by a day
-    endT: Date.now() + timeDiffMs(v.fromStop.t, target.t),
     endName: target.name,
     path,
     line: v.line
@@ -183,28 +221,21 @@ function render() {
   updateStatus()
 }
 
-// --- animation loop: smooth, forward-only, track-following movement ---
-let lastFrame = performance.now()
+// --- animation loop: replay the operator forecast along the track ---
 let lastPathsUpdate = 0
-function frame(now: number) {
-
-  const dt = Math.min(now - lastFrame, 100) // clamp gaps (e.g. after tab hidden)
-  lastFrame = now
+function frame(rafNow: number) {
   if (animStates.size > 0) {
+    const now = Date.now()
     for (const [id, s] of animStates) {
-      // On arrival the vehicle holds until the next poll names a new segment.
-      // There is no chain to walk: HAFAS only tells us the current one.
-      const s2 = advanceAnimation(s, Date.now(), dt, ANIM)
-      animStates.set(id, s2)
       const m = markers.get(id)
-      if (m) {
-        const [lat, lon] = pointAlongPath(s2.path, s2.progress)
-        m.setLngLat([lon, lat])
-      }
+      if (!m) continue
+      const along = alongAt(s.ms, s.alongs, now - s.reportT, s.total)
+      const [lat, lon] = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
+      m.setLngLat([lon, lat])
     }
     // refresh the current-position → target paths a few times per second
-    if (now - lastPathsUpdate > 500) {
-      lastPathsUpdate = now
+    if (rafNow - lastPathsUpdate > 500) {
+      lastPathsUpdate = rafNow
       updateTargetsFeatures()
     }
   }
@@ -263,11 +294,8 @@ function updateTargetsFeatures() {
       properties: {name: s.endName ?? v.nextStop ?? v.id}
     })
     // path from the vehicle's CURRENT animated position to the target
-    const cur = pointAlongPath(s.path, s.progress)
-    const last = s.path[s.path.length - 1]
-    const total = projectOntoPath(s.path, {lat: last[0], lon: last[1]}).along
-    const along = projectOntoPath(s.path, {lat: cur[0], lon: cur[1]}).along
-    const remaining = slicePath(s.path, along, total)
+    const along = alongAt(s.ms, s.alongs, Date.now() - s.reportT, s.total)
+    const remaining = slicePath(s.path, along, s.total)
     features.push({
       type: 'Feature',
       geometry: {type: 'LineString', coordinates: remaining.map(([lat, lon]) => [lon, lat])},

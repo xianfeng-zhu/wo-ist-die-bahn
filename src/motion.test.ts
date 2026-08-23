@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAnimation, berlinEpoch, pointAlongPath, projectOntoPath, slicePath, timeDiffMs} from './motion.js'
+import {alongAt, berlinEpoch, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -55,64 +55,46 @@ describe('berlinEpoch', () => {
   })
 })
 
-describe('advanceAnimation', () => {
-  const base = {
-    progress: 0,
-    velocity: 0,
-    endT: Date.UTC(2026, 7, 19, 23, 4, 0), // arrival 120s after t0
-    path: [[0, 0], [0, 10], [0, 20]] as Array<[number, number]>,
-    start: {lat: 0, lon: 0},
-    end: {lat: 0, lon: 20}
-  }
-  const t0 = Date.UTC(2026, 7, 19, 23, 2, 0)
+describe('alongAt', () => {
+  // operator forecast: 0/10/20/30 s -> 0/100/300/600 m along the path
+  const ms = [0, 10000, 20000, 30000]
+  const alongs = [0, 100, 300, 600]
+  const total = 1000
 
-  it('moves forward toward the arrival time (schedule-paced)', () => {
-    const s = advanceAnimation(base, t0, 1000, {speedFactor: 1, maxAccel: 0.02, maxDecel: 0.02})
-    expect(s.progress).toBeGreaterThan(0)
-    expect(s.progress).toBeLessThan(0.02)
-    expect(s.velocity).toBeGreaterThan(0)
+  it('returns the first sample at or before the report instant', () => {
+    expect(alongAt(ms, alongs, 0, total)).toBe(0)
+    expect(alongAt(ms, alongs, -5000, total)).toBe(0)
   })
-
-  it('never moves backward when the arrival is already due', () => {
-    const past = advanceAnimation({...base, endT: t0 - 1000}, t0, 1000, {speedFactor: 1, maxAccel: 0.02, maxDecel: 0.02})
-    expect(past.progress).toBe(0)
-    expect(past.velocity).toBe(0)
+  it('hits each sample exactly', () => {
+    expect(alongAt(ms, alongs, 10000, total)).toBeCloseTo(100, 6)
+    expect(alongAt(ms, alongs, 30000, total)).toBeCloseTo(600, 6)
   })
-
-  it('holds at the end of the segment (progress 1) instead of overshooting', () => {
-    // 0.99 + a step big enough to pass the end: clamps to exactly 1, no rebound
-    const at = advanceAnimation({...base, progress: 0.99, velocity: 0.5}, t0, 1000, {speedFactor: 1, maxAccel: 0.1, maxDecel: 0.1})
-    expect(at.progress).toBe(1)
-    expect(at.velocity).toBe(0)
+  it('interpolates linearly between samples', () => {
+    expect(alongAt(ms, alongs, 15000, total)).toBeCloseTo(200, 6)
+    expect(alongAt(ms, alongs, 25000, total)).toBeCloseTo(450, 6)
   })
-
-  it('ramps velocity toward the target with bounded acceleration', () => {
-    const s1 = advanceAnimation(base, t0, 1000, {speedFactor: 1, maxAccel: 0.001, maxDecel: 0.001})
-    const s2 = advanceAnimation({...base, velocity: s1.velocity, progress: s1.progress}, t0 + 1000, 1000, {speedFactor: 1, maxAccel: 0.001, maxDecel: 0.001})
-    expect(s2.velocity - s1.velocity).toBeLessThanOrEqual(0.001 + 1e-9)
-    expect(s2.velocity).toBeGreaterThanOrEqual(s1.velocity)
+  it('follows the forecast speed, not a constant speed', () => {
+    // 0-10s covers 100m, 20-30s covers 300m: the vehicle accelerates
+    const first = alongAt(ms, alongs, 5000, total)
+    const last = alongAt(ms, alongs, 25000, total) - alongAt(ms, alongs, 20000, total)
+    expect(first).toBeCloseTo(50, 6)
+    expect(last).toBeCloseTo(150, 6)
   })
-
-  it('decelerates to a stop (forward-only) when the data target falls behind', () => {
-    const s = advanceAnimation({...base, velocity: 0.02, progress: 0.5}, t0, 1000, {speedFactor: 1, maxAccel: 0.01, maxDecel: 0.01})
-    expect(s.progress).toBeGreaterThanOrEqual(0.5)
-    expect(s.velocity).toBeLessThan(0.02)
+  it('coasts at the last speed past the end of the forecast', () => {
+    // last interval is 300m/10s, so +10s past the end is +300m
+    expect(alongAt(ms, alongs, 40000, total)).toBeCloseTo(900, 6)
   })
-})
-
-describe('timeDiffMs', () => {
-  it('computes the schedule duration between two stop times', () => {
-    expect(timeDiffMs('01022100', '01023500')).toBe(14000)
+  it('never exceeds the path length', () => {
+    expect(alongAt(ms, alongs, 600000, total)).toBe(total)
   })
-  it('handles overnight wrap', () => {
-    expect(timeDiffMs('23590000', '00030000')).toBe(240000)
+  it('never goes backwards when the forecast does', () => {
+    expect(alongAt([0, 10000], [500, 400], 10000, total)).toBeGreaterThanOrEqual(0)
+    expect(alongAt([0, 10000], [500, -100], 10000, total)).toBe(0)
   })
-  it('clamps extreme values', () => {
-    expect(timeDiffMs('01000000', '02000000')).toBe(30 * 60 * 1000) // > 30min cap
-    expect(timeDiffMs('01000000', '01001000')).toBe(10000) // < 10s floor
+  it('holds position for a single-sample forecast', () => {
+    expect(alongAt([0], [250], 99000, total)).toBe(250)
   })
-  it('falls back to 60s on unparseable times', () => {
-    expect(timeDiffMs('xxyyzz', '010000')).toBe(60000)
-    expect(timeDiffMs('010000', 'xxyyzz')).toBe(60000)
+  it('returns 0 for an empty forecast', () => {
+    expect(alongAt([], [], 1000, total)).toBe(0)
   })
 })

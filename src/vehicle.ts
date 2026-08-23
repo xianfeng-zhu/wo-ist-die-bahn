@@ -1,5 +1,16 @@
+import {decodePolyline} from './polyline.js'
 
 export type Product = 'suburban' | 'subway' | 'tram'
+
+/**
+ * The operator's own short-term motion forecast for one vehicle: positions at
+ * `ms[i]` milliseconds after the report instant. `pts[0]` is the reported
+ * position, so `ms[0]` is 0. Measured shape today: 4 samples, 10 s apart.
+ */
+export interface Forecast {
+  ms: number[]
+  pts: Array<[number, number]>
+}
 
 /** A stop with coordinates and a time (HHMMSS, realtime preferred). */
 export interface StopRef {
@@ -30,6 +41,8 @@ export interface Vehicle {
   fromStop?: StopRef
   /** Stop the vehicle is heading to — HAFAS's own declared target (`ani.tLocX`). */
   toStop?: StopRef
+  /** Operator forecast for the next ~30 s (`ani.mSec` + `ani.polyG`). */
+  forecast?: Forecast
 }
 
 export const PRODUCT_BY_CLS: Record<number, Product> = {1: 'suburban', 2: 'subway', 4: 'tram'}
@@ -97,6 +110,8 @@ export interface StopoverLike {
 interface Common {
   locs: Array<{name?: string; crd?: {x?: number; y?: number}}>
   prods: Array<{name?: string; cls?: number}>
+  /** `common.polyL`; indexed by `ani.polyG.polyXL`. */
+  polys?: Array<{crdEncYX?: string}>
 }
 
 export interface Journey {
@@ -112,7 +127,12 @@ export interface Journey {
    * index 0 is "now". (`mSec`/`proc`/`polyG` also describe the forecast
    * positions, but its first point is just `pos` — see AGENTS.md.)
    */
-  ani?: {fLocX?: number[]; tLocX?: number[]}
+  ani?: {
+    fLocX?: number[]
+    tLocX?: number[]
+    mSec?: number[]
+    polyG?: {polyXL?: number[]}
+  }
 }
 
 /**
@@ -158,9 +178,19 @@ export function transformJourney(j: Journey, common: Common, nowTime: string, st
     if (!loc?.name || loc.crd?.x == null || loc.crd.y == null || !t) return undefined
     return {name: loc.name, lat: loc.crd.y / 1e6, lon: loc.crd.x / 1e6, t}
   }
+  // the operator's forecast: one polyline point per mSec sample
+  let forecast: Forecast | undefined
+  const enc = common.polys?.[j.ani?.polyG?.polyXL?.[0] ?? -1]?.crdEncYX
+  const ms = j.ani?.mSec
+  if (enc && ms && ms.length > 0) {
+    const pts = decodePolyline(enc)
+    const n = Math.min(pts.length, ms.length)
+    if (n > 0) forecast = {ms: ms.slice(0, n), pts: pts.slice(0, n)}
+  }
   return {
     fromStop: stopAt(j.ani?.fLocX?.[0]),
     toStop: stopAt(j.ani?.tLocX?.[0]),
+    forecast,
     id: j.jid ?? 'unknown',
     line: prod?.name ?? product,
     product,

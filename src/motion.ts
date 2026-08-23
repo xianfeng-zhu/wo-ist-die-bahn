@@ -6,16 +6,18 @@ export interface LatLon {
 }
 
 export interface AnimState {
-  /** 0..1 along the segment path (0 = segment start, 1 = next stop). */
-  progress: number
-  /** progress units per second (smoothed, forward-only). */
-  velocity: number
-  /** Segment start (the animated position when the segment was created). */
+  /** Wall-clock epoch (ms) that forecast offset `ms[0]` corresponds to. */
+  reportT: number
+  /** Forecast offsets (ms after `reportT`), ascending. */
+  ms: number[]
+  /** Distance along `path` at each forecast offset, non-decreasing. */
+  alongs: number[]
+  /** Total length of `path` in the same units as `alongs`. */
+  total: number
+  /** Segment start (the reported position when the segment was created). */
   start: LatLon
-  /** Segment end (the next stop). */
+  /** Segment end (the declared next stop). */
   end: LatLon
-  /** Arrival epoch (ms) at the next stop (Europe/Berlin wall clock). */
-  endT: number
   /** Next stop name (segment identity; a change starts a new segment). */
   endName?: string
   /** Track from start to end (lat/lon); falls back to a straight line. */
@@ -25,27 +27,29 @@ export interface AnimState {
 }
 
 /**
- * Schedule duration (ms) between two stop times. Relative differences are
- * stable even when HAFAS absolute times lag by an operating day. Overnight
- * wrap is handled; result clamped to [10s, 30min], 60s fallback.
+ * Distance along a path at `elapsedMs`, from the operator's own forecast
+ * samples (`ms[i]` -> `alongs[i]`, both ascending, same length, >= 1 entry).
+ *
+ * Piecewise-linear between samples. Past the last sample it keeps going at the
+ * last sample interval's speed, so a late poll coasts instead of freezing.
+ * Never decreases and never exceeds `total`.
  */
-export function timeDiffMs(prev: string, next: string): number {
-  const toSec = (s: string): number => {
-    const d = s.replace(/:/g, '').padStart(6, '0')
-    return Number(d.slice(0, 2)) * 3600 + Number(d.slice(2, 4)) * 60 + Number(d.slice(4, 6))
+export function alongAt(ms: number[], alongs: number[], elapsedMs: number, total: number): number {
+  const n = Math.min(ms.length, alongs.length)
+  if (n === 0) return 0
+  const clamp = (a: number): number => Math.max(0, Math.min(total, a))
+  if (n === 1 || elapsedMs <= ms[0]) return clamp(alongs[0])
+  for (let i = 1; i < n; i++) {
+    if (elapsedMs <= ms[i]) {
+      const span = ms[i] - ms[i - 1]
+      const f = span <= 0 ? 1 : (elapsedMs - ms[i - 1]) / span
+      return clamp(alongs[i - 1] + (alongs[i] - alongs[i - 1]) * f)
+    }
   }
-  let diff = (toSec(next) - toSec(prev)) * 1000
-  if (diff < 0) diff += 24 * 3600 * 1000
-  if (!Number.isFinite(diff)) return 60000
-  return Math.min(Math.max(diff, 10000), 30 * 60 * 1000)
-}
-
-export interface MotionOpts {
-  /** 1.0 = real-time pace; scales the schedule-derived speed. */
-  speedFactor: number
-  /** Max progress/sec change per second (smooth speed transitions). */
-  maxAccel: number
-  maxDecel: number
+  // past the forecast: coast at the last known speed
+  const span = ms[n - 1] - ms[n - 2]
+  const speed = span <= 0 ? 0 : (alongs[n - 1] - alongs[n - 2]) / span
+  return clamp(alongs[n - 1] + speed * (elapsedMs - ms[n - 1]))
 }
 
 /** Position at `progress` (0..1) along a path, walking by accumulated length. */
@@ -165,28 +169,4 @@ export function berlinEpoch(dateStr: string, timeStr: string): number {
   const get = (type: string) => Number(parts.find(p => p.type === type)?.value ?? '0')
   const wall = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
   return epoch - (wall - epoch)
-}
-
-/**
- * Advance one animation step. Forward-only: progress never decreases; the
- * vehicle eases toward the schedule-paced target velocity and holds when the
- * arrival is due or the data target is behind.
- */
-export function advanceAnimation(state: AnimState, nowMs: number, dtMs: number, opts: MotionOpts): AnimState {
-  const dt = Math.max(dtMs, 0) / 1000
-  const remaining = Math.max(state.endT - nowMs, 0) / 1000
-  const targetVel = remaining > 0 && state.progress < 1
-    ? Math.min((1 - state.progress) / remaining, 1) * opts.speedFactor
-    : 0
-
-  // bounded acceleration toward the (non-negative) target — smooth transitions
-  const maxStep = targetVel >= state.velocity ? opts.maxAccel * dt : opts.maxDecel * dt
-  const nextVel = Math.max(0, state.velocity + Math.max(-maxStep, Math.min(maxStep, targetVel - state.velocity)))
-
-  let progress = state.progress + nextVel * dt
-  if (progress >= 1) {
-    progress = 1
-  }
-
-  return {...state, progress, velocity: progress >= 1 ? 0 : nextVel}
 }
