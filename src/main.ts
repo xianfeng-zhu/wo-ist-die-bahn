@@ -1,11 +1,11 @@
-import {Map as GLMap, Marker, Popup, setWorkerUrl, type MapLayerMouseEvent} from 'maplibre-gl'
+import {Map as GLMap, Marker, Popup, setWorkerUrl, type FilterSpecification, type MapLayerMouseEvent} from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
-import {filterVehicles, Product, Vehicle} from './vehicle.js'
+import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {advanceAnimation, AnimState, pointAlongPath, projectOntoPath, slicePath, timeDiffMs} from './motion.js'
-import {buildSegmentPath, firstStopAhead, LineShapes} from './track.js'
+import {buildSegmentPath, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
 // the module; Vite doesn't emit it, so point it at the copy we ship in
@@ -73,7 +73,7 @@ map.on('moveend', () => {
 
 // --- vehicle markers (line-labeled badges) ---
 const markers = new Map<string, Marker>()
-/** Active line-name filter (empty = all lines). */
+/** Active product filter (one flag per mode; all on by default). */
 const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
 /** Active line-name filter (empty = all lines). */
 let lineFilter = new Set<string>()
@@ -102,6 +102,14 @@ function badgeElement(v: Vehicle): HTMLElement {
   el.className = 'veh'
   el.style.background = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
   el.textContent = v.line
+  // debugging handles: the full jid for headless queries, the short id on hover
+  el.dataset.vehicleId = v.id
+  el.title = `${v.line} · ${shortId(v.id)}`
+  // caption under the badge, shown only while the "IDs" toggle is on
+  const vid = document.createElement('span')
+  vid.className = 'vid'
+  vid.textContent = shortId(v.id)
+  el.append(vid)
   return el
 }
 
@@ -110,41 +118,40 @@ function popupHtml(v: Vehicle): string {
     `<b>${v.line}</b> ${PRODUCT_LABELS[v.product]}<br>→ ${v.direction}<br>next: ${v.nextStop ?? '—'}` +
     (v.delayMs != null
       ? `<br><span style="color:${v.delayMs >= 300000 ? '#c62828' : '#333'}">delay: ${Math.round(v.delayMs / 60000)} min</span>`
-      : '')
+      : '') +
+    `<br><span class="pid">id: <b>${shortId(v.id)}</b><br>${v.id}</span>`
   )
 }
 
-/** (Re)build a vehicle's animation chain from its latest data, continuing
- * from the current animated position (never jumps). */
+/**
+ * (Re)build a vehicle's animation segment from its latest data, continuing from
+ * the current animated position (never jumps).
+ *
+ * The segment is the one HAFAS declares (`fromStop` -> `toStop`); it is never
+ * inferred from the stopover list, which is a 4-entry summary whose entries are
+ * not adjacent (see Vehicle.stops). Only the track geometry comes from GTFS.
+ */
 function updateSegment(v: Vehicle, m: Marker) {
   const prev = animStates.get(v.id)
-  if (!v.stops || v.stops.length < 2) {
-    // no stop-chain data: static marker at the polled position
+  const target = v.toStop
+  if (!target || !v.fromStop) {
+    // HAFAS declared no segment: static marker at the polled position
     animStates.delete(v.id)
     m.setLngLat([v.lon, v.lat])
     return
   }
   const from = prev ? pointAlongPath(prev.path, prev.progress) : [v.lat, v.lon]
   const fromPos = {lat: from[0], lon: from[1]}
-  const k = firstStopAhead(lineShapes, v.line, fromPos, v.stops)
-  if (k < 1) {
-    // no known stop ahead — hold at the current position
-    animStates.delete(v.id)
-    m.setLngLat([from[0], from[1]])
-    return
-  }
-  const target = v.stops[k]
   const path = buildSegmentPath(lineShapes, v.line, fromPos, {lat: target.lat, lon: target.lon})
   animStates.set(v.id, {
     progress: 0,
     velocity: Math.max(0, prev?.velocity ?? 0), // keep momentum across re-anchors
     start: fromPos,
     end: {lat: target.lat, lon: target.lon},
-    endT: Date.now() + timeDiffMs(v.stops[k - 1].t, target.t),
+    // relative stop-time difference; absolute HAFAS times can lag by a day
+    endT: Date.now() + timeDiffMs(v.fromStop.t, target.t),
     endName: target.name,
     path,
-    stops: v.stops,
-    segIndex: k,
     line: v.line
   })
 }
@@ -185,33 +192,12 @@ function frame(now: number) {
   lastFrame = now
   if (animStates.size > 0) {
     for (const [id, s] of animStates) {
-      const next = advanceAnimation(s, Date.now(), dt, ANIM)
-      const stops = next.stops
-      const segIndex = next.segIndex ?? 0
-      if (next.progress >= 1 && stops && stops.length >= 2 && segIndex < stops.length - 1) {
-        // arrived at the target: continue to the FOLLOWING stop so the tram
-        // keeps moving until fresh data arrives
-        const k = segIndex + 1
-        const fromPos = {lat: stops[k].lat, lon: stops[k].lon}
-        const target = stops[k + 1]
-        const path = buildSegmentPath(lineShapes, next.line, fromPos, {lat: target.lat, lon: target.lon})
-        animStates.set(id, {
-          ...next,
-          progress: 0,
-          velocity: Math.max(0, next.velocity), // keep momentum
-          start: fromPos,
-          end: {lat: target.lat, lon: target.lon},
-          endT: Date.now() + timeDiffMs(stops[k].t, target.t),
-          endName: target.name,
-          segIndex: k,
-          path
-        })
-      } else {
-        animStates.set(id, next)
-      }
+      // On arrival the vehicle holds until the next poll names a new segment.
+      // There is no chain to walk: HAFAS only tells us the current one.
+      const s2 = advanceAnimation(s, Date.now(), dt, ANIM)
+      animStates.set(id, s2)
       const m = markers.get(id)
       if (m) {
-        const s2 = animStates.get(id)!
         const [lat, lon] = pointAlongPath(s2.path, s2.progress)
         m.setLngLat([lon, lat])
       }
@@ -227,6 +213,12 @@ function frame(now: number) {
 requestAnimationFrame(frame)
 
 // --- debug/test: show each vehicle's next target (stop) + segment path ---
+// One source holds both geometries, so every layer MUST filter by $type: a
+// circle layer draws one circle per geometry position, so without the filter
+// `targets-layer` would also dot every vertex of every path (~10x the circles,
+// and path vertices would swallow the target clicks).
+const POINTS_ONLY: FilterSpecification = ['==', '$type', 'Point']
+const LINES_ONLY: FilterSpecification = ['==', '$type', 'LineString']
 function addTargetsLayers() {
   map.addSource('targets', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
   // white casing underneath for contrast on any map background
@@ -234,18 +226,21 @@ function addTargetsLayers() {
     id: 'anim-paths-casing',
     type: 'line',
     source: 'targets',
+    filter: LINES_ONLY,
     paint: {'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9}
   })
   map.addLayer({
     id: 'anim-paths-layer',
     type: 'line',
     source: 'targets',
+    filter: LINES_ONLY,
     paint: {'line-color': '#ff6d00', 'line-width': 3.5, 'line-opacity': 0.95}
   })
   map.addLayer({
     id: 'targets-layer',
     type: 'circle',
     source: 'targets',
+    filter: POINTS_ONLY,
     paint: {'circle-radius': 7, 'circle-color': '#ff6d00', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5}
   })
   map.on('click', 'targets-layer', (e: MapLayerMouseEvent) => {
@@ -379,9 +374,13 @@ modeRow.className = 'mode'
     filters[p] = cb.checked
     render()
   }
-  label.append(cb, ` ${PRODUCT_LABELS[p]}`, ` <span style="color:${PRODUCT_COLORS[p]}">●</span>`)
+  const dot = document.createElement('span')
+  dot.style.color = PRODUCT_COLORS[p]
+  dot.textContent = '●'
+  label.append(cb, ` ${PRODUCT_LABELS[p]} `, dot)
   modeRow.append(label)
 })
+filterEl.append(modeRow)
 // Line-name filter: comma/space-separated, empty = all lines
 const parseLines = (s: string): Set<string> =>
   new Set(s.split(/[,;\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean))
@@ -430,3 +429,30 @@ targetsCb.onchange = () => {
 targetsLabel.append(targetsCb, ' Targets')
 
 filterEl.append(targetsLabel)
+
+// Vehicle IDs: short unique label attached under each badge (see shortId). On
+// by default for debugging; uncheck, or narrow with Lines, when it gets busy.
+const idsLabel = document.createElement('label')
+idsLabel.className = 'layer'
+const idsCb = document.createElement('input')
+idsCb.type = 'checkbox'
+idsCb.checked = true
+idsCb.onchange = () => document.body.classList.toggle('show-vids', idsCb.checked)
+document.body.classList.toggle('show-vids', idsCb.checked)
+idsLabel.append(idsCb, ' IDs')
+filterEl.append(idsLabel)
+
+/**
+ * Debug handle for headless checks (console capture is unreliable — see
+ * AGENTS.md). Read-only by convention; `byId` takes a full jid or a shortId.
+ */
+;(window as unknown as {__lb: unknown}).__lb = {
+  map,
+  animStates,
+  get vehicles() { return vehicles },
+  get lineShapes() { return lineShapes },
+  byId: (q: string) => {
+    const v = vehicles.find(x => x.id === q || shortId(x.id) === q)
+    return v ? {vehicle: v, anim: animStates.get(v.id)} : null
+  }
+}

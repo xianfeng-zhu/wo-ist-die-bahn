@@ -24,6 +24,24 @@ body { font: 13px system-ui, sans-serif; }
   border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.5);
   cursor: pointer;
 }
+/* Debug caption under a badge. Do NOT give .veh a position: it IS the MapLibre
+   marker element, already position:absolute (so it anchors this child), and
+   style.css loads after maplibre-gl.css — overriding it breaks marker placement. */
+.vid {
+  display: none;
+  /* butted against the badge's bottom border so the two read as one object */
+  position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+  padding: 0 3px; border: 1px solid #fff; border-radius: 3px;
+  background: rgba(255,255,255,.95); color: #222;
+  font: 600 9px/12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap; pointer-events: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+body.show-vids .vid { display: block; }
+.maplibregl-popup-content .pid {
+  display: block; margin-top: 4px; padding-top: 4px; border-top: 1px solid #ddd;
+  font: 10px/14px ui-monospace, SFMono-Regular, Menlo, monospace; color: #666;
+}
 @media (max-width: 640px) {
   #statusbar { top: 8px; left: 8px; font-size: 12px; }
   #attribution { top: 8px; right: 8px; bottom: auto; left: auto; }

@@ -80,8 +80,10 @@ describe('advanceAnimation', () => {
   })
 
   it('holds at the end of the segment (progress 1) instead of overshooting', () => {
-    const at = advanceAnimation({...base, progress: 0.99, velocity: 0.02}, t0, 1000, {speedFactor: 2, maxAccel: 0.1, maxDecel: 0.1})
-    expect(at.progress).toBeLessThanOrEqual(1)
+    // 0.99 + a step big enough to pass the end: clamps to exactly 1, no rebound
+    const at = advanceAnimation({...base, progress: 0.99, velocity: 0.5}, t0, 1000, {speedFactor: 1, maxAccel: 0.1, maxDecel: 0.1})
+    expect(at.progress).toBe(1)
+    expect(at.velocity).toBe(0)
   })
 
   it('ramps velocity toward the target with bounded acceleration', () => {
@@ -105,8 +107,12 @@ describe('timeDiffMs', () => {
   it('handles overnight wrap', () => {
     expect(timeDiffMs('23590000', '00030000')).toBe(240000)
   })
-  it('clamps extreme values and falls back on missing data', () => {
+  it('clamps extreme values', () => {
     expect(timeDiffMs('01000000', '02000000')).toBe(30 * 60 * 1000) // > 30min cap
     expect(timeDiffMs('01000000', '01001000')).toBe(10000) // < 10s floor
+  })
+  it('falls back to 60s on unparseable times', () => {
+    expect(timeDiffMs('xxyyzz', '010000')).toBe(60000)
+    expect(timeDiffMs('010000', 'xxyyzz')).toBe(60000)
   })
 })
