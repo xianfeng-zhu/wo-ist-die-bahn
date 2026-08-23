@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAlong, AnimState, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, AnimState, metresBetween, pointAlongPath, projectOntoPath, slicePath, stepTowards} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 
 // MapLibre loads its tile-processing worker from an external file relative to
@@ -167,13 +167,9 @@ function popupHtml(v: Vehicle): string {
  */
 const SHAPE_FIT_LIMIT_M = 250
 
-/** Metres between two lat/lon points (local flat approximation). */
-const metres = (a: [number, number], b: [number, number]): number =>
-  Math.hypot((a[0] - b[0]) * 111320, (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180))
-
 const maxResidualM = (path: Array<[number, number]>, pts: Array<[number, number]>): number => {
   let worst = 0
-  for (const pt of pts) worst = Math.max(worst, metres(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
+  for (const pt of pts) worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
   return worst
 }
 
@@ -218,7 +214,7 @@ function updateSegment(v: Vehicle, m: Marker) {
     // would strand the vehicle short of its stop.
     const last = f.pts[f.pts.length - 1]
     const to: [number, number] = [target.lat, target.lon]
-    path = metres(last, to) > 25 ? [...f.pts, to] : [...f.pts]
+    path = metresBetween(last, to) > 25 ? [...f.pts, to] : [...f.pts]
   }
   const alongs = alongsOnPath(path, f.pts)
   const total = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
@@ -229,6 +225,8 @@ function updateSegment(v: Vehicle, m: Marker) {
   const drawnAlong = drawn ? Math.min(projectOntoPath(path, {lat: drawn[0], lon: drawn[1]}).along, total) : 0
   animStates.set(v.id, {
     drawnAlong,
+    drawnT: Date.now(),
+    renderPos: prev?.renderPos, // keep what is on screen; frame() glides to the fix
     reportT: Date.now(),
     ms: f.ms,
     alongs,
@@ -276,10 +274,13 @@ function frame(rafNow: number) {
     for (const [id, s] of animStates) {
       const m = markers.get(id)
       if (!m) continue
+      const dtMs = now - s.drawnT
       const along = advanceAlong(s, now)
       s.drawnAlong = along
-      const [lat, lon] = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
-      m.setLngLat([lon, lat])
+      s.drawnT = now
+      const target = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
+      s.renderPos = s.renderPos ? stepTowards(s.renderPos, target, dtMs) : target
+      m.setLngLat([s.renderPos[1], s.renderPos[0]])
     }
     // refresh the current-position → target paths a few times per second
     if (rafNow - lastPathsUpdate > 500) {

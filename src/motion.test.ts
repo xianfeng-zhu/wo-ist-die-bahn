@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAlong, alongAt, berlinEpoch, COAST_GRACE_MS, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, metresBetween, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -55,6 +55,51 @@ describe('berlinEpoch', () => {
   })
 })
 
+describe('stepTowards', () => {
+  const berlin: [number, number] = [52.52, 13.405]
+
+  it('lands exactly on target when the gap is within the frame budget', () => {
+    // normal motion: 25 m/s over a 16 ms frame is 0.4 m, far under the ~6.4 m cap
+    const near: [number, number] = [52.52 + 0.4 / 111320, 13.405]
+    expect(metresBetween(berlin, near)).toBeLessThan(1)
+    expect(stepTowards(berlin, near, 16)).toEqual(near)
+  })
+
+  it('caps a large correction to the frame budget', () => {
+    const far: [number, number] = [52.53, 13.42] // ~1.4 km away
+    const next = stepTowards(berlin, far, 16)
+    const moved = metresBetween(berlin, next)
+    expect(moved).toBeCloseTo(CATCHUP_MAX_SPEED * 0.016, 1)
+    expect(moved).toBeLessThan(10) // no visible blink
+  })
+
+  it('moves along the straight line toward the target', () => {
+    const far: [number, number] = [52.62, 13.405] // due north
+    const next = stepTowards(berlin, far, 100)
+    expect(next[1]).toBeCloseTo(13.405, 6)
+    expect(next[0]).toBeGreaterThan(52.52)
+  })
+
+  it('closes a kilometre-scale gap in a couple of seconds', () => {
+    let p = berlin
+    const far: [number, number] = [52.53, 13.42]
+    let frames = 0
+    while (metresBetween(p, far) > 1 && frames < 600) { p = stepTowards(p, far, 16); frames++ }
+    expect(frames * 16).toBeLessThan(4000)
+  })
+
+  it('never exceeds the hard per-frame cap, however long the frame was', () => {
+    const far: [number, number] = [52.72, 13.9] // ~40 km away
+    for (const dt of [16, 100, 1000, 30000]) {
+      expect(metresBetween(berlin, stepTowards(berlin, far, dt))).toBeLessThanOrEqual(CATCHUP_MAX_STEP + 1e-6)
+    }
+  })
+
+  it('does not move for a zero-length frame', () => {
+    expect(stepTowards(berlin, [52.53, 13.42], 0)).toEqual(berlin)
+  })
+})
+
 describe('advanceAlong', () => {
   const base = {
     reportT: 1_000_000,
@@ -62,41 +107,70 @@ describe('advanceAlong', () => {
     alongs: [0, 100, 300, 600],
     total: 1000,
     drawnAlong: 0,
+    drawnT: 1_000_000,
     start: {lat: 0, lon: 0},
     end: {lat: 0, lon: 1},
     path: [[0, 0], [0, 1]] as Array<[number, number]>
   }
 
-  it('follows the forecast while it lasts', () => {
-    expect(advanceAlong(base, base.reportT + 15000)).toBeCloseTo(200, 6)
+  /** Replay frame by frame, as the render loop does. */
+  const run = (state: typeof base, untilMs: number, stepMs = 16) => {
+    let s = {...state}
+    for (let t = s.drawnT + stepMs; t <= untilMs; t += stepMs) {
+      s = {...s, drawnAlong: advanceAlong(s, t), drawnT: t}
+    }
+    return s.drawnAlong
+  }
+
+  it('tracks the forecast exactly while following it', () => {
+    // 15000 is not a whole number of 16 ms frames, so allow a sub-metre shortfall
+    expect(run(base, base.reportT + 15000)).toBeCloseTo(200, 0)
   })
 
   it('never draws behind what it has already drawn', () => {
-    // a fresh poll re-anchors at 0 while 250 was already drawn: hold, never reverse
+    // re-anchored at 0 while 250 was already drawn: hold, never reverse
     expect(advanceAlong({...base, drawnAlong: 250}, base.reportT)).toBe(250)
-    expect(advanceAlong({...base, drawnAlong: 250}, base.reportT + 5000)).toBe(250)
+    expect(run({...base, drawnAlong: 250}, base.reportT + 5000)).toBe(250)
   })
 
-  it('resumes moving once the forecast passes the drawn position', () => {
-    const held = advanceAlong({...base, drawnAlong: 250}, base.reportT + 15000)
-    expect(held).toBe(250) // forecast is at 200, still behind
-    const past = advanceAlong({...base, drawnAlong: 250}, base.reportT + 18000)
-    expect(past).toBeGreaterThan(250) // forecast at 260, now leads
+  it('eases forward instead of snapping when it trails the forecast', () => {
+    // 500 behind: one frame must close only a sliver, not the whole gap
+    const oneFrame = advanceAlong({...base, drawnAlong: 0, drawnT: base.reportT + 20000}, base.reportT + 20016)
+    expect(oneFrame).toBeGreaterThan(0)
+    expect(oneFrame).toBeLessThan(30) // forecast is at 300 — no teleport
+  })
+
+  it('closes a large gap within a couple of seconds', () => {
+    const start = {...base, drawnAlong: 0, drawnT: base.reportT + 20000}
+    const after2s = run(start, base.reportT + 22000)
+    // forecast is ~360 by then; we should be close behind it, not stuck at 0
+    expect(after2s).toBeGreaterThan(300)
+  })
+
+  it('slows rather than reversing when it runs ahead of the forecast', () => {
+    const ahead = {...base, drawnAlong: 400, drawnT: base.reportT + 15000}
+    const next = advanceAlong(ahead, base.reportT + 15016)
+    expect(next).toBeGreaterThanOrEqual(400)
+    expect(next).toBeLessThan(401)
   })
 
   it('stops coasting once the grace period after the forecast expires', () => {
-    const atLimit = advanceAlong(base, base.reportT + 30000 + COAST_GRACE_MS)
-    const wayLater = advanceAlong(base, base.reportT + 30000 + COAST_GRACE_MS + 600000)
-    expect(wayLater).toBe(atLimit)
+    const atLimit = run(base, base.reportT + 30000 + COAST_GRACE_MS)
+    const wayLater = run(base, base.reportT + 30000 + COAST_GRACE_MS + 20000)
+    expect(wayLater).toBeCloseTo(atLimit, 0)
     expect(wayLater).toBeLessThan(base.total) // did NOT glide to the end of the track
   })
 
   it('coasts during the grace period so a late poll does not freeze it', () => {
-    expect(advanceAlong(base, base.reportT + 32000)).toBeGreaterThan(600)
+    expect(run(base, base.reportT + 32000)).toBeGreaterThan(600)
   })
 
   it('handles an empty forecast without moving', () => {
     expect(advanceAlong({...base, ms: [], alongs: []}, base.reportT + 99000)).toBe(0)
+  })
+
+  it('has a catch-up time constant well under the poll interval', () => {
+    expect(CATCHUP_TAU_MS).toBeLessThan(10000)
   })
 })
 

@@ -31,6 +31,13 @@ export interface AnimState {
    * Hold instead until the forecast catches up.
    */
   drawnAlong: number
+  /** Wall clock of the last draw, so catch-up can be rate-limited over time. */
+  drawnT: number
+  /**
+   * The position actually drawn last frame. Survives a path swap, so a
+   * corrected position is glided to rather than snapped to (see stepTowards).
+   */
+  renderPos?: [number, number]
 }
 
 /**
@@ -40,14 +47,76 @@ export interface AnimState {
  */
 export const COAST_GRACE_MS = 5000
 
+/** Metres between two lat/lon points (local flat approximation). */
+export function metresBetween(a: [number, number], b: [number, number]): number {
+  return Math.hypot((a[0] - b[0]) * 111320, (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180))
+}
+
 /**
- * Distance along `state.path` to draw at `nowMs`. Forward-only (never less than
- * `state.drawnAlong`) and bounded by `COAST_GRACE_MS` past the forecast.
+ * Fastest the drawn position may be dragged toward a corrected one. Far above
+ * any real vehicle (~1440 km/h) so normal motion lands exactly on target with
+ * no lag, but slow enough that a correction is a glide rather than a blink:
+ * at 60 fps this caps a single frame at ~7 m.
+ */
+export const CATCHUP_MAX_SPEED = 400
+
+/**
+ * Hard ceiling on one frame's correction, whatever `dtMs` says. A stalled frame
+ * (slow tab, background throttling) would otherwise buy a budget big enough to
+ * be a visible jump again. 25 m is above anything normal motion needs at a
+ * realistic frame rate, so it only ever limits corrections.
+ */
+export const CATCHUP_MAX_STEP = 25
+
+/**
+ * Move `from` toward `to`, covering at most `CATCHUP_MAX_SPEED` over `dtMs`.
+ *
+ * Rate-limiting has to happen in position space, not along-track space: each
+ * poll can replace the whole path, and a point projected onto a *new* path can
+ * land far from where the badge was drawn. That showed up as the badge blinking
+ * out and reappearing hundreds of metres ahead.
+ */
+export function stepTowards(from: [number, number], to: [number, number], dtMs: number): [number, number] {
+  const gap = metresBetween(from, to)
+  const budget = Math.min(CATCHUP_MAX_SPEED * Math.max(0, dtMs) / 1000, CATCHUP_MAX_STEP)
+  if (gap === 0 || gap <= budget) return to
+  const f = budget / gap
+  return [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f]
+}
+
+/**
+ * Time constant for closing a gap between the drawn position and the forecast.
+ * A gap opens when the vehicle sits at the end of its path (the declared stop)
+ * while the real one drives on: the next segment then starts hundreds of metres
+ * ahead. Snapping there looks like the badge blinking out and reappearing, so
+ * close the gap over ~1.5 s instead. Small gaps are absorbed almost at once.
+ */
+export const CATCHUP_TAU_MS = 500
+
+/**
+ * Distance along `state.path` to draw at `nowMs`.
+ *
+ * Tracks the forecast exactly while it is being followed, and closes any
+ * backlog smoothly on top of that. Forward-only: when the drawn position is
+ * AHEAD of the forecast (after a hold) it slows rather than reversing. Bounded
+ * by `COAST_GRACE_MS` past the forecast and by the path length.
  */
 export function advanceAlong(state: AnimState, nowMs: number): number {
   const lastMs = state.ms.length > 0 ? state.ms[state.ms.length - 1] : 0
-  const elapsed = Math.min(nowMs - state.reportT, lastMs + COAST_GRACE_MS)
-  return Math.max(state.drawnAlong, alongAt(state.ms, state.alongs, elapsed, state.total))
+  const cap = lastMs + COAST_GRACE_MS
+  const at = (since: number): number =>
+    alongAt(state.ms, state.alongs, Math.min(since, cap), state.total)
+
+  const expected = at(nowMs - state.reportT)
+  const previous = at(state.drawnT - state.reportT)
+  const dt = Math.max(0, nowMs - state.drawnT)
+  // what the forecast itself advanced since the last draw
+  const nominal = Math.max(0, expected - previous)
+  // how far the drawn position trails (negative = it is ahead, so ease off)
+  const backlog = previous - state.drawnAlong
+  const closed = backlog * (1 - Math.exp(-dt / CATCHUP_TAU_MS))
+  const next = state.drawnAlong + nominal + closed
+  return Math.max(state.drawnAlong, Math.min(state.total, next))
 }
 
 /**
