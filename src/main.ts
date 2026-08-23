@@ -443,6 +443,42 @@ void poll()
 
 // --- mode filters + layer toggles ---
 const filterEl = document.getElementById('filters')!
+
+/*
+ * Responsive controls. The filter panel needs ~270 px and the status bar ~220 px;
+ * below the sum of those (plus margins) they would overlap, so the panel
+ * collapses behind a button instead of being squeezed or pushed off-window.
+ * Panels are also capped against the viewport in style.css, so any window that
+ * can show the button can show the panel.
+ */
+const COMPACT_MAX_WIDTH = 720
+const compactQuery = matchMedia(`(max-width: ${COMPACT_MAX_WIDTH}px)`)
+
+const settingsToggle = document.createElement('button')
+settingsToggle.id = 'settings-toggle'
+settingsToggle.type = 'button'
+settingsToggle.textContent = '\u2699'
+settingsToggle.title = 'Settings'
+settingsToggle.setAttribute('aria-label', 'Settings')
+settingsToggle.setAttribute('aria-controls', 'filters')
+document.body.append(settingsToggle)
+
+function setSettingsOpen(open: boolean) {
+  document.body.classList.toggle('settings-open', open)
+  settingsToggle.setAttribute('aria-expanded', String(open))
+}
+settingsToggle.onclick = () => setSettingsOpen(!document.body.classList.contains('settings-open'))
+
+function applyCompact() {
+  document.body.classList.toggle('compact', compactQuery.matches)
+  // leaving compact: the panel is always visible again, so drop the open state
+  if (!compactQuery.matches) setSettingsOpen(false)
+}
+compactQuery.addEventListener('change', applyCompact)
+applyCompact()
+setSettingsOpen(false)
+// tapping the map dismisses the panel, like any other overlay
+map.on('click', () => { if (document.body.classList.contains('settings-open')) setSettingsOpen(false) })
 const modeRow = document.createElement('div')
 modeRow.className = 'mode'
 ;(Object.keys(PRODUCT_LABELS) as Product[]).forEach(p => {

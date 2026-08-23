@@ -1,14 +1,44 @@
 html, body, #map { height: 100%; margin: 0; }
 body { font: 13px system-ui, sans-serif; }
+/*
+ * Overlay panels must fit ANY window. Every one is capped against the viewport
+ * and scrolls internally rather than spilling off-screen, and #settings-toggle
+ * collapses the filter panel once the window is too narrow to hold it beside
+ * the status bar (see body.compact in main.ts).
+ */
 #statusbar {
   position: fixed; top: 10px; left: 10px; z-index: 1000;
   background: rgba(255,255,255,.92); padding: 6px 10px; border-radius: 6px;
   box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  box-sizing: border-box; max-width: calc(100vw - 76px);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #filters {
-  position: fixed; top: 10px; right: 10px; z-index: 1000;
+  position: fixed; top: 10px; right: 10px; z-index: 1001;
   background: rgba(255,255,255,.92); padding: 8px 10px; border-radius: 6px;
   box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  box-sizing: border-box;
+  max-width: calc(100vw - 20px); max-height: calc(100vh - 20px); overflow: auto;
+}
+
+/* Settings button — shown only while the panel is collapsed. */
+#settings-toggle {
+  display: none;
+  position: fixed; top: 10px; right: 10px; z-index: 1002;
+  width: 40px; height: 40px; padding: 0;
+  align-items: center; justify-content: center;
+  font: 18px/1 system-ui; cursor: pointer;
+  background: rgba(255,255,255,.94); color: #333;
+  border: 1px solid #bbb; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+#settings-toggle:hover { background: #fff; }
+body.compact #settings-toggle { display: flex; }
+body.compact #filters { display: none; }
+/* opened: sits below the button and can never exceed the window */
+body.compact.settings-open #filters {
+  display: block; top: 58px;
+  max-height: calc(100vh - 68px);
 }
 #filters .mode { display: flex; gap: 6px; margin-bottom: 6px; }
 #filters .mode input[type='text'] { width: 90px; font: 12px system-ui; padding: 1px 4px; border: 1px solid #999; border-radius: 3px; }
@@ -19,7 +49,7 @@ body { font: 13px system-ui, sans-serif; }
 
 /* error log — debug view only; hidden until something is actually logged */
 #debuglog {
-  position: fixed; top: 44px; left: 10px; z-index: 1000; margin: 0;
+  position: fixed; top: 58px; left: 10px; z-index: 1000; margin: 0;
   max-width: min(560px, calc(100vw - 20px)); max-height: 130px; overflow: auto;
   background: rgba(255,235,235,.95); color: #7a1c1c;
   border: 1px solid #e0a0a0; border-radius: 6px; padding: 5px 8px;
@@ -67,13 +97,13 @@ body.dense .vid { display: none; }
   display: block; margin-top: 4px; padding-top: 4px; border-top: 1px solid #ddd;
   font: 10px/14px ui-monospace, SFMono-Regular, Menlo, monospace; color: #666;
 }
-@media (max-width: 640px) {
+/* Short windows: keep the log from eating the map. */
+@media (max-height: 520px) {
+  #debuglog { max-height: 64px; }
+}
+@media (max-width: 480px) {
   #statusbar { top: 8px; left: 8px; font-size: 12px; }
-  #debuglog { top: 40px; left: 8px; right: 8px; max-height: 90px; }
-  #filters {
-    top: auto; bottom: 8px; left: 8px; right: 8px;
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  }
-  #filters .mode { margin-bottom: 0; }
-  .maplibregl-ctrl-bottom-right { bottom: 64px; }
+  #settings-toggle { top: 8px; right: 8px; }
+  #debuglog { top: 56px; left: 8px; right: 8px; }
+  body.compact.settings-open #filters { top: 56px; right: 8px; left: 8px; max-width: none; }
 }
