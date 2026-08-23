@@ -14,3 +14,17 @@ npm run build          # -> dist/
 
 ## Data
 Live positions: VBB HAFAS (`fahrinfo.vbb.de/gate`). Network data: VBB GTFS + linienfarben (CC BY 4.0). Map: © OpenStreetMap contributors.
+
+## Checking vehicle movement
+
+Manual watching is unreliable, so movement is measured instead:
+
+1. Open the app, tick **Record motion** in the settings panel.
+2. Leave the browser running (15 min is plenty; longer catches rarer faults).
+3. Click **Save log** — the browser downloads an `.ndjson` file.
+4. `node scripts/analyse-motion.mjs <file> [--vehicle 75416-24]`
+
+The report lists teleports, reversals, freezes, implausible speeds, station
+dwells, per-vehicle journeys, and drift between the position drawn on the map
+and the position the operator reported. Fault detection runs on every animation
+frame; the position trace is sampled at 5 Hz (`?traceHz=N` to change).

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import type {Product} from './vehicle.js'
-import {delayFrom, filterVehicles, productFromCls, transformJourney} from './vehicle.js'
+import {delayFrom, filterVehicles, productFromCls, shortId, transformJourney} from './vehicle.js'
 
 describe('productFromCls', () => {
   it('maps HAFAS cls bitmask to rail products', () => {
@@ -9,6 +9,78 @@ describe('productFromCls', () => {
     expect(productFromCls(4)).toBe('tram')
     expect(productFromCls(8)).toBeNull() // bus
     expect(productFromCls(64)).toBeNull() // regional
+  })
+})
+
+describe('transformJourney segment (HAFAS ani)', () => {
+  // locL entries need coords to become a StopRef
+  const locs = [
+    {name: 'Origin', crd: {x: 13000000, y: 52400000}},
+    {name: 'Left behind', crd: {x: 13100000, y: 52410000}},
+    {name: 'Heading to', crd: {x: 13200000, y: 52420000}},
+    {name: 'Terminus', crd: {x: 13300000, y: 52430000}}
+  ]
+  const prods = [{name: 'S9', cls: 1}]
+  // the shape HAFAS always returns: [origin, previous, next, destination]
+  const j = {
+    jid: '1|1|0|86|20082026',
+    prodX: 0,
+    pos: {x: 13150000, y: 52415000},
+    stopL: [
+      {locX: 0, dTimeS: '230000'},
+      {locX: 1, aTimeS: '230500', dTimeS: '230600'},
+      {locX: 2, aTimeS: '230900', dTimeS: '231000'},
+      {locX: 3, aTimeS: '234000'}
+    ],
+    ani: {fLocX: [1, 1, 1, 1], tLocX: [2, 2, 2, 2]}
+  }
+
+  it('takes the segment from ani.fLocX / ani.tLocX', () => {
+    const v = transformJourney(j, {locs, prods}, '230700')!
+    expect(v.fromStop).toEqual({name: 'Left behind', lat: 52.41, lon: 13.1, t: '230500'})
+    expect(v.toStop).toEqual({name: 'Heading to', lat: 52.42, lon: 13.2, t: '230900'})
+  })
+
+  it('resolves the target by locX, not by stopover position', () => {
+    // HAFAS points at the LAST stopover: it must win over stopL[2]
+    const v = transformJourney({...j, ani: {fLocX: [2], tLocX: [3]}}, {locs, prods}, '230700')!
+    expect(v.toStop?.name).toBe('Terminus')
+  })
+
+  it('leaves the segment undefined when ani is absent', () => {
+    const {ani, ...noAni} = j
+    const v = transformJourney(noAni, {locs, prods}, '230700')!
+    expect(v.fromStop).toBeUndefined()
+    expect(v.toStop).toBeUndefined()
+  })
+
+  it('leaves the segment undefined when the referenced stop has no coords', () => {
+    const bare = [{name: 'Origin'}, {name: 'No coords'}, {name: 'Also none'}, {name: 'T'}]
+    const v = transformJourney(j, {locs: bare, prods}, '230700')!
+    expect(v.toStop).toBeUndefined()
+  })
+
+  it('still exposes the raw 4-stopover summary (not a chain)', () => {
+    const v = transformJourney(j, {locs, prods}, '230700')!
+    expect(v.stops?.map(s => s.name)).toEqual(['Origin', 'Left behind', 'Heading to', 'Terminus'])
+  })
+})
+
+describe('shortId', () => {
+  it('shortens a HAFAS journey id to ref-variant', () => {
+    expect(shortId('1|108006|0|86|23082026')).toBe('108006-0')
+  })
+  it('keeps the variant field (the ref alone is not unique)', () => {
+    // both vehicles share ref 105929 and must stay distinguishable
+    expect(shortId('1|105929|33|86|23082026')).toBe('105929-33')
+    expect(shortId('1|105929|32|86|23082026')).toBe('105929-32')
+  })
+  it('passes through an id that is not a HAFAS journey id', () => {
+    expect(shortId('unknown')).toBe('unknown')
+  })
+  it('passes through when the ref or variant field is empty', () => {
+    expect(shortId('1||0|86|23082026')).toBe('1||0|86|23082026')
+    expect(shortId('1|108006')).toBe('1|108006')
   })
 })
 

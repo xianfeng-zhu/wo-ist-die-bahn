@@ -5,58 +5,201 @@ export interface LatLon {
   lon: number
 }
 
-export interface StopLike {
-  name: string
-  lat: number
-  lon: number
-  t: string // HHMMSS (realtime-preferred), relative differences are stable
-}
-
 export interface AnimState {
-  /** 0..1 along the segment path (0 = segment start, 1 = next stop). */
-  progress: number
-  /** progress units per second (smoothed, forward-only). */
-  velocity: number
-  /** Segment start (the animated position when the segment was created). */
+  /** Wall-clock epoch (ms) that forecast offset `ms[0]` corresponds to. */
+  reportT: number
+  /** Forecast offsets (ms after `reportT`), ascending. */
+  ms: number[]
+  /** Distance along `path` at each forecast offset, non-decreasing. */
+  alongs: number[]
+  /** Total length of `path` in the same units as `alongs`. */
+  total: number
+  /** Segment start (the reported position when the segment was created). */
   start: LatLon
-  /** Segment end (the next stop). */
+  /** Segment end (the declared next stop). */
   end: LatLon
-  /** Arrival epoch (ms) at the next stop (Europe/Berlin wall clock). */
-  endT: number
   /** Next stop name (segment identity; a change starts a new segment). */
   endName?: string
   /** Track from start to end (lat/lon); falls back to a straight line. */
   path: Array<[number, number]>
-  /** Remaining stops of the trip (index 0 = current/just-left stop). */
-  stops?: StopLike[]
-  /** Which stop is the current segment's target (index into `stops`). */
-  segIndex?: number
-  /** Line name (needed to slice the track for chained segments). */
+  /** Line name (used to slice the track for the current segment). */
   line?: string
+  /**
+   * Highest distance along `path` already drawn. Motion is forward-only: each
+   * poll re-anchors on the reported position, which can sit slightly BEHIND
+   * what we had extrapolated, and snapping back reads as the vehicle reversing.
+   * Hold instead until the forecast catches up.
+   */
+  drawnAlong: number
+  /** Wall clock of the last draw, so catch-up can be rate-limited over time. */
+  drawnT: number
+  /**
+   * The position actually drawn last frame. Survives a path swap, so a
+   * corrected position is glided to rather than snapped to (see stepTowards).
+   */
+  renderPos?: [number, number]
+  /** True while `renderPos` still trails the computed position (see stepTowards). */
+  correcting?: boolean
+  /** Last direction the badge actually moved, so it can never be dragged back. */
+  heading?: [number, number]
 }
 
 /**
- * Schedule duration (ms) between two stop times. Relative differences are
- * stable even when HAFAS absolute times lag by an operating day. Overnight
- * wrap is handled; result clamped to [10s, 30min], 60s fallback.
+ * How long to keep coasting after the forecast's last sample. Covers a late
+ * poll without inventing minutes of movement: once data stops arriving the
+ * vehicle stops too, rather than gliding off on a stale prediction.
  */
-export function timeDiffMs(prev: string, next: string): number {
-  const toSec = (s: string): number => {
-    const d = s.replace(/:/g, '').padStart(6, '0')
-    return Number(d.slice(0, 2)) * 3600 + Number(d.slice(2, 4)) * 60 + Number(d.slice(4, 6))
-  }
-  let diff = (toSec(next) - toSec(prev)) * 1000
-  if (diff < 0) diff += 24 * 3600 * 1000
-  if (!Number.isFinite(diff)) return 60000
-  return Math.min(Math.max(diff, 10000), 30 * 60 * 1000)
+export const COAST_GRACE_MS = 5000
+
+/** Metres between two lat/lon points (local flat approximation). */
+export function metresBetween(a: [number, number], b: [number, number]): number {
+  return Math.hypot((a[0] - b[0]) * 111320, (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180))
 }
 
-export interface MotionOpts {
-  /** 1.0 = real-time pace; scales the schedule-derived speed. */
-  speedFactor: number
-  /** Max progress/sec change per second (smooth speed transitions). */
-  maxAccel: number
-  maxDecel: number
+/**
+ * Fastest the drawn position may be dragged toward a corrected one. Far above
+ * any real vehicle (~1440 km/h) so normal motion lands exactly on target with
+ * no lag, but slow enough that a correction is a glide rather than a blink:
+ * at 60 fps this caps a single frame at ~7 m.
+ */
+export const CATCHUP_MAX_SPEED = 400
+
+/**
+ * Hard ceiling on one frame's correction, whatever `dtMs` says. A stalled frame
+ * (slow tab, background throttling) would otherwise buy a budget big enough to
+ * be a visible jump again. 25 m is above anything normal motion needs at a
+ * realistic frame rate, so it only ever limits corrections.
+ */
+export const CATCHUP_MAX_STEP = 25
+
+/**
+ * Move `from` toward `to`, covering at most `CATCHUP_MAX_SPEED` over `dtMs`.
+ *
+ * Rate-limiting has to happen in position space, not along-track space: each
+ * poll can replace the whole path, and a point projected onto a *new* path can
+ * land far from where the badge was drawn. That showed up as the badge blinking
+ * out and reappearing hundreds of metres ahead.
+ */
+export function stepTowards(from: [number, number], to: [number, number], dtMs: number): [number, number] {
+  const gap = metresBetween(from, to)
+  const budget = Math.min(CATCHUP_MAX_SPEED * Math.max(0, dtMs) / 1000, CATCHUP_MAX_STEP)
+  if (gap === 0 || gap <= budget) return to
+  const f = budget / gap
+  return [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f]
+}
+
+/**
+ * Move `from` toward `to`, but never against `heading`.
+ *
+ * `stepTowards` has no sense of direction: when a poll corrects a badge to a
+ * position BEHIND it, easing there drags it backwards. `drawnAlong` keeps
+ * progress monotonic along one path, but a path swap re-projects the position,
+ * so the guarantee has to be repeated here in position space. Holding until the
+ * correction moves ahead reads as a pause; reversing reads as a bug.
+ */
+export function forwardStep(
+  from: [number, number],
+  to: [number, number],
+  heading: [number, number] | null,
+  dtMs: number
+): [number, number] {
+  const next = stepTowards(from, to, dtMs)
+  if (!heading) return next
+  const move: [number, number] = [next[0] - from[0], next[1] - from[1]]
+  return heading[0] * move[0] + heading[1] * move[1] < 0 ? from : next
+}
+
+/** Distance in metres along a path of lat/lon points. */
+export function pathMetres(path: Array<[number, number]>): number {
+  let total = 0
+  for (let i = 1; i < path.length; i++) total += metresBetween(path[i - 1], path[i])
+  return total
+}
+
+/**
+ * Fastest a Berlin S-Bahn, U-Bahn or tram plausibly runs (45 m/s = 162 km/h,
+ * comfortably above the S-Bahn's 100 km/h). If a track implies more than this
+ * over the forecast, the track is wrong for this vehicle — usually a shape that
+ * fits within tolerance but takes a much longer way round, or a ring line where
+ * projection wraps to the far side.
+ */
+export const SPEED_SANITY_MPS = 45
+
+/**
+ * Speed the forecast implies along `path`, in m/s. Returns 0 when it cannot be
+ * determined. `alongs`/`total` are in the degree units `projectOntoPath` uses,
+ * so the fraction is converted through the path's true length.
+ */
+export function impliedSpeed(
+  ms: number[], alongs: number[], total: number, path: Array<[number, number]>
+): number {
+  const n = Math.min(ms.length, alongs.length)
+  if (n < 2 || total <= 0) return 0
+  const seconds = (ms[n - 1] - ms[0]) / 1000
+  if (seconds <= 0) return 0
+  const fraction = (alongs[n - 1] - alongs[0]) / total
+  return (fraction * pathMetres(path)) / seconds
+}
+
+/**
+ * Time constant for closing a gap between the drawn position and the forecast.
+ * A gap opens when the vehicle sits at the end of its path (the declared stop)
+ * while the real one drives on: the next segment then starts hundreds of metres
+ * ahead. Snapping there looks like the badge blinking out and reappearing, so
+ * close the gap over ~1.5 s instead. Small gaps are absorbed almost at once.
+ */
+export const CATCHUP_TAU_MS = 500
+
+/**
+ * Distance along `state.path` to draw at `nowMs`.
+ *
+ * Tracks the forecast exactly while it is being followed, and closes any
+ * backlog smoothly on top of that. Forward-only: when the drawn position is
+ * AHEAD of the forecast (after a hold) it slows rather than reversing. Bounded
+ * by `COAST_GRACE_MS` past the forecast and by the path length.
+ */
+export function advanceAlong(state: AnimState, nowMs: number): number {
+  const lastMs = state.ms.length > 0 ? state.ms[state.ms.length - 1] : 0
+  const cap = lastMs + COAST_GRACE_MS
+  const at = (since: number): number =>
+    alongAt(state.ms, state.alongs, Math.min(since, cap), state.total)
+
+  const expected = at(nowMs - state.reportT)
+  const previous = at(state.drawnT - state.reportT)
+  const dt = Math.max(0, nowMs - state.drawnT)
+  // what the forecast itself advanced since the last draw
+  const nominal = Math.max(0, expected - previous)
+  // how far the drawn position trails (negative = it is ahead, so ease off)
+  const backlog = previous - state.drawnAlong
+  const closed = backlog * (1 - Math.exp(-dt / CATCHUP_TAU_MS))
+  const next = state.drawnAlong + nominal + closed
+  return Math.max(state.drawnAlong, Math.min(state.total, next))
+}
+
+/**
+ * Distance along a path at `elapsedMs`, from the operator's own forecast
+ * samples (`ms[i]` -> `alongs[i]`, both ascending, same length, >= 1 entry).
+ *
+ * Piecewise-linear between samples. Past the last sample it keeps going at the
+ * last sample interval's speed, so a late poll coasts instead of freezing.
+ * Never decreases and never exceeds `total`.
+ */
+export function alongAt(ms: number[], alongs: number[], elapsedMs: number, total: number): number {
+  const n = Math.min(ms.length, alongs.length)
+  if (n === 0) return 0
+  const clamp = (a: number): number => Math.max(0, Math.min(total, a))
+  if (n === 1 || elapsedMs <= ms[0]) return clamp(alongs[0])
+  for (let i = 1; i < n; i++) {
+    if (elapsedMs <= ms[i]) {
+      const span = ms[i] - ms[i - 1]
+      const f = span <= 0 ? 1 : (elapsedMs - ms[i - 1]) / span
+      return clamp(alongs[i - 1] + (alongs[i] - alongs[i - 1]) * f)
+    }
+  }
+  // past the forecast: coast at the last known speed
+  const span = ms[n - 1] - ms[n - 2]
+  const speed = span <= 0 ? 0 : (alongs[n - 1] - alongs[n - 2]) / span
+  return clamp(alongs[n - 1] + speed * (elapsedMs - ms[n - 1]))
 }
 
 /** Position at `progress` (0..1) along a path, walking by accumulated length. */
@@ -176,28 +319,4 @@ export function berlinEpoch(dateStr: string, timeStr: string): number {
   const get = (type: string) => Number(parts.find(p => p.type === type)?.value ?? '0')
   const wall = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
   return epoch - (wall - epoch)
-}
-
-/**
- * Advance one animation step. Forward-only: progress never decreases; the
- * vehicle eases toward the schedule-paced target velocity and holds when the
- * arrival is due or the data target is behind.
- */
-export function advanceAnimation(state: AnimState, nowMs: number, dtMs: number, opts: MotionOpts): AnimState {
-  const dt = Math.max(dtMs, 0) / 1000
-  const remaining = Math.max(state.endT - nowMs, 0) / 1000
-  const targetVel = remaining > 0 && state.progress < 1
-    ? Math.min((1 - state.progress) / remaining, 1) * opts.speedFactor
-    : 0
-
-  // bounded acceleration toward the (non-negative) target — smooth transitions
-  const maxStep = targetVel >= state.velocity ? opts.maxAccel * dt : opts.maxDecel * dt
-  const nextVel = Math.max(0, state.velocity + Math.max(-maxStep, Math.min(maxStep, targetVel - state.velocity)))
-
-  let progress = state.progress + nextVel * dt
-  if (progress >= 1) {
-    progress = 1
-  }
-
-  return {...state, progress, velocity: progress >= 1 ? 0 : nextVel}
 }

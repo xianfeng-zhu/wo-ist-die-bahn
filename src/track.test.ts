@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {buildSegmentPath, firstStopAhead} from './track.js'
+import {buildSegmentPath} from './track.js'
 
 // a straight north-south shape, 0..30
 const shape: Array<[number, number]> = [[0, 0], [10, 0], [20, 0], [30, 0]]
@@ -29,32 +29,5 @@ describe('buildSegmentPath', () => {
   it('falls back to a straight line when from and to project to the same point', () => {
     const p = buildSegmentPath({M10: shape}, 'M10', {lat: 15, lon: 0}, {lat: 15, lon: 0})
     expect(p.length).toBeGreaterThanOrEqual(2)
-  })
-})
-
-describe('firstStopAhead', () => {
-  const shape: Array<[number, number]> = [[0, 0], [10, 0], [20, 0], [30, 0]]
-  const stops = [
-    {name: 'A', lat: 0, lon: 0, t: '01000000'},
-    {name: 'B', lat: 10, lon: 0, t: '01010000'},
-    {name: 'C', lat: 25, lon: 0, t: '01020000'}
-  ]
-  it('picks the first stop ahead of the position', () => {
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 2, lon: 0}, stops)).toBe(1)
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 15, lon: 0}, stops)).toBe(2)
-  })
-  it('returns -1 when no stop is ahead', () => {
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 29, lon: 0}, stops)).toBe(-1)
-  })
-  it('follows the stops order when travel runs against the shape direction', () => {
-    // stops listed southbound (decreasing along) while the shape increases northward
-    const south = [stops[2], stops[1], stops[0]]
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 20, lon: 0}, south)).toBe(1) // B, not A
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 5, lon: 0}, south)).toBe(2) // A (past B)
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 1, lon: 0}, south)).toBe(2) // A still ahead
-    expect(firstStopAhead({M10: shape}, 'M10', {lat: 0, lon: 0}, south)).toBe(-1) // past all
-  })
-  it('falls back to the first upcoming stop without a shape', () => {
-    expect(firstStopAhead({}, 'M10', {lat: 2, lon: 0}, stops)).toBe(1)
   })
 })

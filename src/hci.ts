@@ -26,7 +26,7 @@ export function berlinDateTime(now: Date): {date: string; time: string} {
   }
 }
 
-export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: number) {
+export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: number, products: number = RAIL_MASK) {
   return {
     lang: 'de',
     svcReqL: [{
@@ -43,7 +43,7 @@ export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: n
         perSize: 30000,
         perStep: 10000,
         ageOfReport: true,
-        jnyFltrL: [{type: 'PROD', mode: 'INC', value: RAIL_MASK}],
+        jnyFltrL: [{type: 'PROD', mode: 'INC', value: products}],
         trainPosMode: 'CALC'
       }
     }],
@@ -63,6 +63,7 @@ interface RadarResponse {
       common?: {
         locL?: Array<{name?: string; crd?: {x?: number; y?: number}}>
         prodL?: Array<{name?: string; cls?: number}>
+        polyL?: Array<{crdEncYX?: string}>
       }
       jnyL?: Journey[]
     }
@@ -75,19 +76,20 @@ export function parseRadar(json: unknown, nowTime: string, strictName = true): V
   const res = svc.res ?? {}
   const common = {
     locs: res.common?.locL ?? [],
-    prods: res.common?.prodL ?? []
+    prods: res.common?.prodL ?? [],
+    polys: res.common?.polyL ?? []
   }
   return (res.jnyL ?? [])
     .map((j: Journey) => transformJourney(j, common, nowTime, strictName))
     .filter((v: Vehicle | null): v is Vehicle => v !== null)
 }
 
-export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal, strictName = true): Promise<Vehicle[]> {
+export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal, strictName = true, products = RAIL_MASK): Promise<Vehicle[]> {
   const {date, time} = berlinDateTime(new Date())
   const res = await fetch(`${GATE_URL}?rnd=${Date.now()}`, {
     method: 'POST',
     headers: {'content-type': 'application/json'},
-    body: JSON.stringify(buildRadarBody(bbox, date, time, maxJny)),
+    body: JSON.stringify(buildRadarBody(bbox, date, time, maxJny, products)),
     signal
   })
   if (!res.ok) throw new Error(`HAFAS HTTP ${res.status}`)
