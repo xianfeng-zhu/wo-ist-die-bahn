@@ -33,6 +33,75 @@ Measured on `feat/per-variant-shapes` (this branch's parent), live data, ~330 ve
 - **Not** changing `projectOntoPath`'s degree-space parameterisation. `pointAlongPath` and `slicePath` share those units and all three must agree; changing them is core animation maths for a benefit that lands almost entirely on residual comparison. Instead `maxResidualM` gets its own true-metre metric. The remaining approximation gets documented.
 - **Not** adding "snap when the gap is absurd". The time-box alone breaks the deadlock, and snapping would undo the earlier fix that made corrections glide instead of blink. One mechanism, not two.
 
+## RESULTS (executed 2026-08-25)
+
+All arms 118-153 s, ~290-330 vehicles, same evening, nothing else running in the page.
+
+| | main | parent branch | **shipping** |
+|---|---|---|---|
+| freezes per 100 s | 8.6 | 13.8 | **0** |
+| badge still while data moving | — | 33.5% | **14.9%** |
+| reversals per 100 s | 0 | 0 | 7.6, **0.6 m each** |
+| drift median / p90 | 7 / 70 m | 5 / 61 m | **6 / 33 m** |
+| drift max | 2240 m | 2088 m | **1787 m** |
+| dwell max | 64 s | 53.8 s | **43.5 s** |
+| overspeed | 1 | 0 | 4 |
+| `badFit` share of rebuilds | 7.9% | 0.25% | **0.28%** |
+| `routes.json` | 76 KB gz | 54 KB gz | 54 KB gz |
+| tests | 104 | 130 | **151** |
+
+**Definition of done: 5 of 7 met.**
+1. Hold is bounded — max observed 2,032 ms against a 2,000 ms limit. MET.
+2. Still-but-should-move well below 33.5% — 14.9%. MET.
+3. Freezes at or below 8.6 per 100 s — 0. MET.
+4. Reversals stay at 0 — NOT met: 7.6 per 100 s. But each is 0.6 m, at the
+   recorder's own noise floor (`reversalMinM` 0.3 m), so nothing is visible on
+   screen. Judged acceptable against freezes going to zero; flagged, not hidden.
+5. `routes.json` shrinks — NOT met, because pruning was reverted (see below).
+6. A gate rejects collapsed geometry — verified by deliberate sabotage. MET.
+7. Tests green, build clean — 151 tests. MET.
+
+### What worked
+
+The deadlock fix, and it was the whole story. `forwardStep` held a badge against
+its heading, `main.ts` only refreshed the heading when the badge moved, so a hold
+could never end. Time-boxing it at 2 s took freezes from 13.8 to 1.4 per 100 s.
+Yielding *slowly* (3 m/s floor, gap/10 s) then took reversals from 25 per 100 s
+down to sub-metre. Raising the hold to 6 s instead was measured and was worse
+(53 reversals per 100 s) — the duration was never the lever.
+
+### What was refuted, on measurement
+
+Two of the review's findings were real observations that did not survive as
+changes. Both were fully implemented, measured against a same-hour control, and
+reverted.
+
+- **True-metre residuals.** The bearing-dependent bias is real (mean 1.8 m, up to
+  7.5 m). Fixing it: drift p90 26 -> 50 m, reversals 5.9 -> 13.6 per 100 s,
+  overspeed 0 -> 3, `badFit` 0.14% -> 0.38%. Accuracy is not the property that
+  matters — *consistency* is. `buildSegmentPath` slices with `projectOntoPath`
+  and `alongsOnPath` paces from the same projection, so a different selection
+  metric picks the shape that fits best by one measure and paces it by another.
+- **Pruning contained variants.** 365 of 533 do run along a longer one, and
+  dropping them does halve the tie ambiguity. It also made everything worse:
+  reversals 5.9 -> 31.4 per 100 s, `badFit` 0.14% -> 0.91%, drift p90 26 -> 52 m.
+  A short variant gives a vehicle a SHORT, unambiguous shape to project onto.
+  Forcing it onto the full-line variant makes projection ambiguous — the same
+  mechanism that sank the length tie-break. My own AGENTS.md claim that a short
+  turn "projects onto the longer one correctly" was the error.
+
+Kept from that work: the exact early-exit limit, the gate floors, the tests and
+the corrected docs. `corridorKey`/`isContainedIn` went with the pruning.
+
+### Process note
+
+One measurement was thrown away as contaminated: an in-page probe scanning every
+vehicle against every variant starved the rAF loop and reported 28 freezes/100 s
+for a build that cleanly measures 11.8. Cheap position reads only, during a
+recording.
+
+---
+
 ## Definition of done
 
 1. No vehicle can be held still for longer than `MAX_HOLD_MS` while its forecast says it is moving.
