@@ -461,13 +461,22 @@ async function loadNetworkLayers() {
     const tracks = await (await fetch('/tracks.json')).json()
     const learned: Array<[string, Product]> = []
     for (const f of tracks.features ?? []) {
-      const line = f.properties?.line
+      // One feature per rendered COLOUR, covering every line that shares it, so a
+      // street used by ten tram lines gets one stroke rather than ten identical
+      // ones. `group` is either a hex (the line has its own official colour) or a
+      // product name (it falls back), which keeps the product hexes in this file
+      // only — see prepare-data.mjs.
+      const group = f.properties?.group as string | undefined
       const product = f.properties?.product as Product | undefined
       f.properties = {
         ...f.properties,
-        color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'
+        color: group?.startsWith('#')
+          ? group
+          : (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'
       }
-      if (line && product) learned.push([line, product])
+      for (const line of (f.properties?.lines ?? []) as string[]) {
+        if (product) learned.push([line, product])
+      }
     }
     // the menus list every line in the network, not just the ones running now
     learnLines(learned)

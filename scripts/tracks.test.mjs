@@ -140,3 +140,25 @@ describe('mergeToTracks output shape', () => {
     expect(runs.length).toBeLessThanOrEqual(3)
   })
 })
+
+describe('mergeToTracks lateral tolerance', () => {
+  // The real case that cell snapping got wrong: two GTFS shapes for the same
+  // street differ laterally by several metres. With plain cell equality, a point
+  // near a cell edge lands in the NEXT cell and reads as uncovered, so the track
+  // was drawn twice. Measured on real data: 40% of tram segments still had a
+  // duplicate within 12 m.
+  for (const offset of [4, 8, 12, 16]) {
+    it(`merges two passes over one street offset by ${offset} m`, () => {
+      const a = north(0, 3000, 90)
+      const b = a.map(([la, lo]) => [la, lo + lonM(offset)])
+      // one pass, plus a little slack for the ends
+      expect(totalM(mergeToTracks([a, b]))).toBeLessThan(3600)
+    })
+  }
+
+  it('keeps tracks that are genuinely a different street apart', () => {
+    const a = north(0, 3000, 90)
+    const b = a.map(([la, lo]) => [la, lo + lonM(60)])
+    expect(totalM(mergeToTracks([a, b]))).toBeGreaterThan(5400)
+  })
+})
