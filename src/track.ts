@@ -24,18 +24,19 @@ export type LineShapes = Record<string, Shape[]>
  * Returns its best candidate however poorly it fits; the caller applies its own
  * limit, so the fit threshold stays in one place (SHAPE_FIT_LIMIT_M).
  *
- * The choice is not perfectly stable, but most of the reason it was not has been
- * removed at source. Variants of one line overlap and a 30 s forecast is only
- * four points, so many candidates once fit equally well: the median gap to the
- * runner-up was 0.0 m and 42% of vehicles changed variant within 60 s, swapping
- * the path under a running animation. Most of those candidates were sub-slices
- * of a longer variant, which `prepare-data.mjs` now drops (1,599 corridors ->
- * 264 variants, ambiguity 83% -> 53%). Breaking the remaining ties by track
- * length was tried and measured WORSE on every other axis (drift p90 61 -> 106 m,
- * dwell p90 12 -> 43 s, overspeed 0 -> 8), because it prefers full-line and
- * full-ring variants and projecting onto a long or closed shape is itself
- * ambiguous. If the residue ever matters, hysteresis on `AnimState` is the next
- * step — not a length preference.
+ * The choice is NOT stable, and every attempt to stabilise it has measured worse.
+ * Variants of one line overlap and a 30 s forecast is four points, so many
+ * candidates fit equally well: the median gap to the runner-up is 0.0 m, and 42%
+ * of vehicles change variant within 60 s. Two fixes were tried and both were
+ * rejected on measurement:
+ *   - breaking ties by track length: drift p90 61 -> 106 m, dwell p90 12 -> 43 s,
+ *     overspeed 0 -> 8;
+ *   - dropping variants contained in a longer one, so the ties never arise:
+ *     reversals 5.9 -> 31.4 per 100 s, badFit 0.14% -> 0.91%, drift p90 26 -> 52 m.
+ * Both fail for the same reason: they push vehicles onto longer shapes, and
+ * projecting onto a long or closed shape is itself ambiguous. A short overlapping
+ * variant is doing useful work — it gives the vehicle a short, unambiguous shape.
+ * If the residue ever matters, hysteresis on `AnimState` is the next thing to try.
  *
  */
 export function pickShape(shapes: Shape[] | undefined, pts: Shape): Shape | undefined {

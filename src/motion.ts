@@ -60,20 +60,25 @@ export function metresBetween(a: [number, number], b: [number, number]): number 
 
 /**
  * Worst distance from any point in `pts` to `path`, in metres. `limit` lets a
- * caller abandon a candidate as soon as it cannot win.
+ * caller abandon a candidate as soon as it cannot win: a candidate already worse
+ * than the incumbent could never win, so this is exact, not approximate.
  *
- * Measures perpendicular distance directly rather than going through
- * `projectOntoPath`, which finds its nearest point in DEGREE space — 1 deg of
- * longitude treated as 1 deg of latitude, where at Berlin longitude is 0.61 of
- * that. That foot point is not the true nearest one, so measuring it in metres
- * overstated the residual by a mean 1.8 m and up to 7.5 m, varying with the
- * segment's BEARING. Harmless against a 250 m threshold, fatal for `pickShape`:
- * it discriminates on differences of a few metres, so the bias let a track's
- * compass direction decide which variant a vehicle was put on.
+ * Deliberately goes through `projectOntoPath`, which finds its nearest point in
+ * DEGREE space (1 deg of longitude treated as 1 deg of latitude, where at Berlin
+ * longitude is 0.61 of that). That foot point is NOT the true nearest one, so the
+ * result overstates the real distance by a mean 1.8 m and up to 7.5 m, varying
+ * with the segment's bearing.
  *
- * (`projectOntoPath`, `pointAlongPath` and `slicePath` still share degree-space
- * units. They are self-consistent with each other, and changing them is a
- * separate job — see AGENTS.md.)
+ * That looks like a bug and it was fixed once — measuring true perpendicular
+ * metres instead — and the fix measured WORSE on every axis: drift p90 26 -> 50 m,
+ * reversals 5.9 -> 13.6 per 100 s, overspeed 0 -> 3, badFit 0.14% -> 0.38%
+ * (same hour, same shapes, only the metric changed).
+ *
+ * The reason is CONSISTENCY, not accuracy. `buildSegmentPath` slices with
+ * `projectOntoPath`, and `alongsOnPath`/`total` parameterise the result the same
+ * way. Selecting a variant with a different metric picks the shape that fits best
+ * by one measure and then paces it by another. Both must move together or not at
+ * all — see AGENTS.md before "fixing" this.
  *
  * Worst, not average: one point kilometres off means the wrong track, however
  * well the rest happens to line up.
@@ -83,28 +88,9 @@ export function maxResidualM(
   pts: Array<[number, number]>,
   limit = Infinity
 ): number {
-  if (path.length === 0) return 0
   let worst = 0
   for (const pt of pts) {
-    if (path.length === 1) {
-      worst = Math.max(worst, metresBetween(pt, path[0]))
-    } else {
-      let best = Infinity
-      for (let i = 1; i < path.length; i++) {
-        const a = path[i - 1]
-        const b = path[i]
-        const kx = 111320 * Math.cos(a[0] * Math.PI / 180)
-        const py = (pt[0] - a[0]) * 111320
-        const px = (pt[1] - a[1]) * kx
-        const by = (b[0] - a[0]) * 111320
-        const bx = (b[1] - a[1]) * kx
-        const len2 = by * by + bx * bx
-        const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, (py * by + px * bx) / len2))
-        const d = Math.hypot(py - by * t, px - bx * t)
-        if (d < best) best = d
-      }
-      worst = Math.max(worst, best)
-    }
+    worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
     if (worst > limit) return worst
   }
   return worst

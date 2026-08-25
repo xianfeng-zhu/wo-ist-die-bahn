@@ -21,7 +21,6 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import {simplifyPath} from './simplify.mjs'
-import {corridorKey, isContainedIn, pathMetres as shapeMetres} from './variants.mjs'
 
 const TMP = mkdtempSync(path.join(os.tmpdir(), 'vbb-'))
 const run = c => execSync(c, {stdio: 'inherit', cwd: TMP})
@@ -194,32 +193,41 @@ try {
   // simplified). Most are the same corridor recorded per service pattern, so
   // collapse by corridor first, then cap.
   const SIMPLIFY_M = 10
-  // A backstop, not a truncation: pruning contained variants already brings every
-  // line under it (worst is M4 at 20), and all 264 cost 37 KB gzipped. Before
-  // pruning, 41 of 48 lines hit a cap of 12 and real branch geometry was lost.
-  const MAX_VARIANTS_PER_LINE = 24
-  const CONTAINED_TOL_M = 50
+  const MAX_VARIANTS_PER_LINE = 12
+
+  /**
+   * Corridor fingerprint: the route sampled at 12 fractions, rounded to ~100 m.
+   * Two trips over the same track get the same key however their shape_ids or
+   * point counts differ. Deliberately NOT keyed on point count — that was an
+   * early mistake: it made near-duplicates look distinct, which is the opposite
+   * of what this is for.
+   */
+  const corridorKey = pts => {
+    const k = []
+    for (let i = 0; i < 12; i++) {
+      const p = pts[Math.round((i / 11) * (pts.length - 1))]
+      k.push(`${p[0].toFixed(3)},${p[1].toFixed(3)}`) // 3 dp ~ 100 m
+    }
+    return k.join(';')
+  }
 
   const lineVariants = new Map() // shortName -> {product, corridors: Map(key -> pts)}
-  const seenShapeIds = new Set()
+  let seenShapes = 0
   for (const [routeId, {shortName, product}] of railRoutes) {
     for (const t of routeTrips.get(routeId) ?? []) {
       const raw = t.shapeId ? shapePts.get(t.shapeId) : undefined
       if (!raw || raw.length < 2) continue
-      if (seenShapeIds.has(t.shapeId)) continue // once per shape_id, not per trip
-      seenShapeIds.add(t.shapeId)
       const deduped = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1])
       if (deduped.length < 2) continue
+      seenShapes++
       const pts = simplifyPath(deduped, SIMPLIFY_M)
       if (!lineVariants.has(shortName)) lineVariants.set(shortName, {product, corridors: new Map()})
       const c = lineVariants.get(shortName).corridors
       const key = corridorKey(pts)
-      // Rank by METRES, not point count. After Douglas-Peucker, point count
-      // tracks curviness, not length: the two disagreed on 14% of pairs, and
-      // S7's 48 km full-line variant has only 117 points -- it survived at rank
-      // 11 of 12, one slot from being dropped and stranding its own subsets.
+      // keep the longest of each corridor group: it covers the most track, so a
+      // vehicle near either end still projects onto it
       const cur = c.get(key)
-      if (!cur || shapeMetres(pts) > shapeMetres(cur)) c.set(key, pts)
+      if (!cur || pts.length > cur.length) c.set(key, pts)
     }
   }
 
@@ -229,50 +237,31 @@ try {
     properties: {line, product}
   })
 
+  // Report the cost at several caps, so the cap can be tuned without another
+  // 600 MB GTFS download.
   const sortedLines = [...lineVariants.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-  const corridorTotal = sortedLines.reduce((n, [, v]) => n + v.corridors.size, 0)
-
-  // Drop any variant that runs entirely along a longer one. It can tell a vehicle
-  // nothing the longer variant cannot, and shipping both is what made pickShape's
-  // choice ambiguous: 365 of 533 shipped variants were contained this way, each
-  // simplified independently so their vertices differ by sub-metre amounts, so
-  // residuals tied to float noise and the chosen path flipped between polls.
-  let contained = 0
-  const keptPerLine = new Map()
-  for (const [line, {corridors}] of sortedLines) {
-    const byLength = [...corridors.values()].sort((a, b) => shapeMetres(b) - shapeMetres(a))
-    const keep = []
-    for (const pts of byLength) {
-      if (keep.some(longer => isContainedIn(pts, longer, CONTAINED_TOL_M))) { contained++; continue }
-      keep.push(pts)
-    }
-    keptPerLine.set(line, keep)
-  }
-  const keptTotal = [...keptPerLine.values()].reduce((n, k) => n + k.length, 0)
-  console.log(`--- variants: ${seenShapeIds.size} shape_ids -> ${corridorTotal} corridors -> ${keptTotal} after dropping ${contained} contained in a longer one`)
-  const worstLines = [...keptPerLine].map(([l, k]) => [l, k.length]).sort((a, b) => b[1] - a[1])
-  console.log(`  most variants: ${worstLines.slice(0, 8).map(([l, c]) => `${l}:${c}`).join('  ')}`)
-
-  // Cost at several caps, so the cap can be retuned without another 600 MB download.
   const buildAt = cap => {
     const out = []
-    for (const [line, keep] of keptPerLine) {
-      const product = lineVariants.get(line).product
-      for (const pts of keep.slice(0, cap)) out.push(toFeature(line, product, pts))
+    for (const [line, {product, corridors}] of sortedLines) {
+      const kept = [...corridors.values()].sort((a, b) => b.length - a.length).slice(0, cap)
+      for (const pts of kept) out.push(toFeature(line, product, pts))
     }
     return out
   }
+  const corridorTotal = sortedLines.reduce((n, [, v]) => n + v.corridors.size, 0)
+  console.log(`--- corridor dedupe: ${seenShapes} shapes -> ${corridorTotal} corridors across ${sortedLines.length} lines`)
+  const worstLines = sortedLines.map(([l, v]) => [l, v.corridors.size]).sort((a, b) => b[1] - a[1])
+  console.log(`  most corridors: ${worstLines.slice(0, 8).map(([l, c]) => `${l}:${c}`).join('  ')}`)
   console.log(`  cap  variants   raw KB   gzip KB`)
-  for (const cap of [4, 8, 12, 16, 9999]) {
+  for (const cap of [4, 6, 8, 12, 16, 9999]) {
     const f = buildAt(cap)
     const json = JSON.stringify({type: 'FeatureCollection', features: f})
-    console.log(`  ${String(cap === 9999 ? 'all' : cap).padStart(4)} ${String(f.length).padStart(9)} ${String(Math.round(Buffer.byteLength(json) / 1024)).padStart(8)} ${String(Math.round(zlib.gzipSync(json).length / 1024)).padStart(9)}`)
+    const gz = zlib.gzipSync(json).length
+    console.log(`  ${String(cap === 9999 ? 'all' : cap).padStart(4)} ${String(f.length).padStart(9)} ${String(Math.round(Buffer.byteLength(json) / 1024)).padStart(8)} ${String(Math.round(gz / 1024)).padStart(9)}`)
   }
 
   const routeFeatures = buildAt(MAX_VARIANTS_PER_LINE)
-  const atCap = worstLines.filter(([, c]) => c > MAX_VARIANTS_PER_LINE)
   console.log(`route variants shipped: ${routeFeatures.length} (cap ${MAX_VARIANTS_PER_LINE} per line)`)
-  console.log(`  lines still at the cap: ${atCap.length}${atCap.length ? ' -> ' + atCap.map(([l, c]) => `${l}:${c}`).join(' ') : ''}`)
 
   // ---- stations.json: Point per rail stop ----
   const stationFeatures = [...stopById.entries()]
@@ -322,8 +311,9 @@ try {
   const routesGz = zlib.gzipSync(routesOut).length
   // Gates need FLOORS, not just ceilings. Collapsing every shape to its two
   // endpoints -- the symptom of a units or tolerance bug in SIMPLIFY_M or the
-  // distance metric -- passed every previous gate at 4.7 KB against a real 54 KB,
-  // and would have shipped 533 straight chords.
+  // distance metric -- passed every earlier gate at 4.7 KB against a real 54 KB,
+  // and would have shipped straight chords for the whole network. Verified by
+  // deliberate sabotage: it now FAILS and routes.json is left untouched.
   const allCoords = routeFeatures.flatMap(f => f.geometry.coordinates)
   const inBerlin = ([lon, lat]) => Number.isFinite(lat) && Number.isFinite(lon) &&
     lat > 51.8 && lat < 53.2 && lon > 12.5 && lon < 14.5

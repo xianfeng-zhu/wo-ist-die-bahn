@@ -374,36 +374,43 @@ describe('maxResidualM', () => {
   })
 })
 
-describe('maxResidualM metric', () => {
+describe('maxResidualM', () => {
   const mLat = (x: number) => x / 111320
   const mLon = (x: number) => x / (111320 * Math.cos((52.5 * Math.PI) / 180))
+  const track: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(1000), 13.4]]
 
-  it('measures the same offset the same way whichever way the track runs', () => {
-    const northTrack: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(1000), 13.4]]
-    const eastTrack: Array<[number, number]> = [[52.5, 13.4], [52.5, 13.4 + mLon(1000)]]
-    const offNorth = maxResidualM(northTrack, [[52.5 + mLat(500), 13.4 + mLon(40)]])
-    const offEast = maxResidualM(eastTrack, [[52.5 + mLat(40), 13.4 + mLon(500)]])
-    expect(offNorth).toBeCloseTo(40, 0)
-    expect(offEast).toBeCloseTo(40, 0)
-    // the bias this fixes was bearing-dependent, up to 7.5 m
-    expect(Math.abs(offNorth - offEast)).toBeLessThan(1)
-  })
-
-  it('reports a diagonal track accurately too', () => {
-    const diag: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(707), 13.4 + mLon(707)]]
-    const perp: [number, number] = [52.5 + mLat(353 - 21.2), 13.4 + mLon(353 + 21.2)]
-    expect(maxResidualM(diag, [perp])).toBeCloseTo(30, 0)
-  })
-
-  it('still returns 0 for points on the path and for an empty list', () => {
-    const track: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(1000), 13.4]]
+  it('returns 0 for points on the path and for an empty list', () => {
     expect(maxResidualM(track, [[52.5 + mLat(500), 13.4]])).toBeCloseTo(0, 3)
     expect(maxResidualM(track, [])).toBe(0)
   })
 
-  it('handles a zero-length segment without dividing by zero', () => {
-    const degenerate: Array<[number, number]> = [[52.5, 13.4], [52.5, 13.4]]
-    expect(maxResidualM(degenerate, [[52.5 + mLat(10), 13.4]])).toBeCloseTo(10, 0)
+  it('grows with the offset from the path', () => {
+    const near = maxResidualM(track, [[52.5 + mLat(500), 13.4 + mLon(40)]])
+    const far = maxResidualM(track, [[52.5 + mLat(500), 13.4 + mLon(400)]])
+    expect(far).toBeGreaterThan(near)
+    expect(near).toBeGreaterThan(0)
+  })
+
+  it('reports the worst offset, not the average', () => {
+    const one = maxResidualM(track, [[52.5 + mLat(500), 13.4 + mLon(100)]])
+    const withClean = maxResidualM(track, [[52.5 + mLat(400), 13.4], [52.5 + mLat(500), 13.4 + mLon(100)]])
+    expect(withClean).toBeCloseTo(one, 6)
+  })
+
+  // The invariant that matters: the residual is measured to the SAME point that
+  // projectOntoPath returns, because buildSegmentPath slices there and
+  // alongsOnPath paces from there. A more accurate metric that disagreed with the
+  // projection measured worse on every axis -- see the note on maxResidualM.
+  it('agrees with the projection used for slicing and pacing', () => {
+    const oblique: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(800), 13.4 + mLon(600)]]
+    for (const pt of [
+      [52.5 + mLat(300), 13.4 + mLon(90)] as [number, number],
+      [52.5 + mLat(700), 13.4 + mLon(120)] as [number, number],
+      [52.5 - mLat(200), 13.4 + mLon(50)] as [number, number]
+    ]) {
+      const foot = projectOntoPath(oblique, {lat: pt[0], lon: pt[1]}).point
+      expect(maxResidualM(oblique, [pt])).toBeCloseTo(metresBetween(pt, foot), 9)
+    }
   })
 
   it('stops early once it is already worse than the limit', () => {
@@ -413,7 +420,6 @@ describe('maxResidualM metric', () => {
   })
 
   it('is unaffected by a limit it never reaches', () => {
-    const track: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(1000), 13.4]]
     const pts: Array<[number, number]> = [[52.5 + mLat(500), 13.4 + mLon(40)]]
     expect(maxResidualM(track, pts, 1000)).toBeCloseTo(maxResidualM(track, pts), 6)
   })
