@@ -426,6 +426,8 @@ const belowDebug = (): string | undefined =>
   ['anim-paths-casing', 'anim-paths-layer', 'targets-layer'].find(id => map.getLayer(id))
 
 async function loadNetworkLayers() {
+  // routes.json is ANIMATION data: one entry per route variant, because each
+  // vehicle needs a short, unambiguous shape to project onto. It is not drawn.
   try {
     const routes = await (await fetch('/routes.json')).json()
     lineShapes = {}
@@ -437,39 +439,41 @@ async function loadNetworkLayers() {
         // them all. GeoJSON [lon, lat] -> [lat, lon].
         ;(lineShapes[line] ??= []).push(coords.map((c: [number, number]) => [c[1], c[0]]))
       }
+    }
+  } catch (err) {
+    logError(`routes.json unavailable (animation falls back to straight lines): ${err instanceof Error ? err.message : String(err)}`)
+  }
+  // tracks.json is DRAWING data: each line's variants merged into the track it
+  // actually runs on, so one set of rails gets one stroke. Drawing routes.json
+  // instead put a dozen strokes on a shared tram street, and stacked strokes
+  // compound their opacity into a solid smear.
+  try {
+    const tracks = await (await fetch('/tracks.json')).json()
+    for (const f of tracks.features ?? []) {
+      const line = f.properties?.line
       const product = f.properties?.product as Product | undefined
       f.properties = {
         ...f.properties,
         color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'
       }
     }
-    map.addSource('routes', {type: 'geojson', data: routes})
+    map.addSource('routes', {type: 'geojson', data: tracks})
     map.addLayer({
       id: 'routes-layer',
       type: 'line',
       source: 'routes',
-      /*
-       * Route lines are context, not the subject. Two things make them heavy, and
-       * both get worse as you zoom out:
-       *  - a line has up to 12 route variants, and they share a trunk. Stacked
-       *    strokes compound their opacity, so a shared street goes almost solid.
-       *    Dropping variants contained in a longer one only takes 533 features to
-       *    302 — trams really do have a dozen distinct ones — so no amount of
-       *    feature dedupe fixes it.
-       *  - below ~z11 the whole tram network falls inside a few hundred pixels,
-       *    where even one stroke per route would be an unreadable mass.
-       * So the lines fade in as you zoom in, and are simply absent city-wide,
-       * which is the zoom where you want to see vehicles on a clean map.
-       */
+      // Still faint, and still absent city-wide: below ~z11 the whole tram network
+      // falls inside a few hundred pixels, where even one stroke per track is an
+      // unreadable mass, and vehicles are what you are there to see.
       minzoom: 11,
       paint: {
         'line-color': ['get', 'color'],
-        'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.6, 14, 1.5, 16, 2.2],
-        'line-opacity': ['interpolate', ['linear'], ['zoom'], 11, 0.12, 13, 0.28, 15, 0.4]
+        'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.8, 14, 1.8, 16, 2.6],
+        'line-opacity': ['interpolate', ['linear'], ['zoom'], 11, 0.3, 14, 0.55, 16, 0.7]
       }
     }, belowDebug())
   } catch (err) {
-    logError(`routes.json unavailable (animation falls back to straight lines): ${err instanceof Error ? err.message : String(err)}`)
+    logError(`tracks.json unavailable (route lines hidden): ${err instanceof Error ? err.message : String(err)}`)
   }
   try {
     const stations = await (await fetch('/stations.json')).json()

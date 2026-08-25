@@ -21,6 +21,7 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import {simplifyPath} from './simplify.mjs'
+import {mergeToTracks} from './tracks.mjs'
 
 const TMP = mkdtempSync(path.join(os.tmpdir(), 'vbb-'))
 const run = c => execSync(c, {stdio: 'inherit', cwd: TMP})
@@ -272,7 +273,61 @@ try {
       properties: {name: s.name}
     }))
 
+  // ---- tracks.json: what to DRAW, one stroke per track ----
+  // Separate from routes.json on purpose. routes.json is animation data: one
+  // entry per route variant, because each vehicle needs a short, unambiguous
+  // shape to project onto. That is the wrong thing to draw — a tram line has
+  // about a dozen variants sharing the same rails, so drawing each one puts a
+  // dozen strokes on one track and they compound into a solid smear.
+  // A faint backdrop line does not need the animation's 10 m accuracy, and the
+  // merge resamples at 8 m, so simplify the drawn result harder.
+  const DRAW_SIMPLIFY_M = 25
+  const mergedPerLine = new Map()
+  for (const [line] of sortedLines) {
+    mergedPerLine.set(line, mergeToTracks([...lineVariants.get(line).corridors.values()]))
+  }
+  const buildTracks = tol => {
+    const out = []
+    for (const [line, {product}] of sortedLines) {
+      const runs = mergedPerLine.get(line).map(r => simplifyPath(r, tol)).filter(r => r.length >= 2)
+      if (runs.length === 0) continue
+      out.push({
+        type: 'Feature',
+        geometry: {type: 'MultiLineString', coordinates: runs.map(r => r.map(([lat, lon]) => [lon, lat]))},
+        properties: {line, product}
+      })
+    }
+    return out
+  }
+  console.log(`  tol   lines    points   raw KB   gzip KB`)
+  for (const tol of [10, 25, 40, 60]) {
+    const f = buildTracks(tol)
+    const pts = f.reduce((n, x) => n + x.geometry.coordinates.reduce((m, r) => m + r.length, 0), 0)
+    const json = JSON.stringify({type: 'FeatureCollection', features: f})
+    console.log(`  ${String(tol).padStart(4)} ${String(f.length).padStart(7)} ${String(pts).padStart(9)} ${String(Math.round(Buffer.byteLength(json) / 1024)).padStart(8)} ${String(Math.round(zlib.gzipSync(json).length / 1024)).padStart(9)}`)
+  }
+
+  // colour is applied at runtime from src/line-colors.ts, so it is not baked in
+  const trackFeatures = buildTracks(DRAW_SIMPLIFY_M)
+
+  // length of a [lon, lat] ring, in metres
+  const ringM = c => {
+    let s = 0
+    for (let i = 1; i < c.length; i++) {
+      const [lo0, la0] = c[i - 1]
+      const [lo1, la1] = c[i]
+      s += Math.hypot((la0 - la1) * 111320, (lo0 - lo1) * 111320 * Math.cos((la0 * Math.PI) / 180))
+    }
+    return s
+  }
+  const drawnKm = trackFeatures.reduce((n, f) =>
+    n + f.geometry.coordinates.reduce((m, r) => m + ringM(r), 0), 0) / 1000
+  const variantKm = routeFeatures.reduce((n, f) => n + ringM(f.geometry.coordinates), 0) / 1000
+  console.log(`--- tracks.json: ${trackFeatures.length} lines, ${drawnKm.toFixed(0)} km drawn`)
+  console.log(`    (drawing every variant instead would be ${variantKm.toFixed(0)} km, ${(variantKm / drawnKm).toFixed(1)}x over the same rails)`)
+
   const routesJson = {type: 'FeatureCollection', features: routeFeatures}
+  const tracksJson = {type: 'FeatureCollection', features: trackFeatures}
   const stationsJson = {type: 'FeatureCollection', features: stationFeatures}
 
   // ---- src/line-colors.ts: linienfarben CSV (';'-separated, latin1) ----
@@ -309,6 +364,9 @@ try {
   const missingU = ['U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9'].filter(n => !lineNames.includes(n))
   const routesOut = JSON.stringify(routesJson)
   const routesGz = zlib.gzipSync(routesOut).length
+  const tracksOut = JSON.stringify(tracksJson)
+  const tracksGz = zlib.gzipSync(tracksOut).length
+  const trackCoords = trackFeatures.flatMap(f => f.geometry.coordinates.flat())
   // Gates need FLOORS, not just ceilings. Collapsing every shape to its two
   // endpoints -- the symptom of a units or tolerance bug in SIMPLIFY_M or the
   // distance metric -- passed every earlier gate at 4.7 KB against a real 54 KB,
@@ -325,6 +383,10 @@ try {
     ['shapes carry real geometry (mean >=15 pts)', meanPts >= 15],
     ['routes.json 20-250 KB gzipped', routesGz >= 20 * 1024 && routesGz <= 250 * 1024],
     ['all coordinates finite and inside Berlin', allCoords.every(inBerlin)],
+    ['tracks.json covers 40-60 lines', trackFeatures.length >= 40 && trackFeatures.length <= 60],
+    ['tracks.json 8-120 KB gzipped', tracksGz >= 8 * 1024 && tracksGz <= 120 * 1024],
+    ['tracks drawn shorter than all variants', drawnKm < variantKm * 0.75],
+    ['track coordinates finite and inside Berlin', trackCoords.every(inBerlin)],
     ['no RE/RB/FEX/ICE routes', bad.length === 0],
     ['S41/S42 present', lineNames.includes('S41') && lineNames.includes('S42')],
     ['U1-U9 present', missingU.length === 0],
@@ -338,9 +400,11 @@ try {
     mkdirSync('public', {recursive: true})
     writeFileSync(path.join('public', 'stations.json'), JSON.stringify(stationsJson))
     writeFileSync(path.join('public', 'routes.json'), routesOut)
+    writeFileSync(path.join('public', 'tracks.json'), tracksOut)
     writeFileSync(path.join('src', 'line-colors.ts'), colorsTs)
     console.log(`stations: ${stationFeatures.length} · route variants: ${routeFeatures.length} across ${lineNames.length} lines · lineColors: ${colorEntries.length}`)
     console.log(`routes.json: ${Math.round(Buffer.byteLength(routesOut) / 1024)} KB raw / ${Math.round(routesGz / 1024)} KB gzipped`)
+    console.log(`tracks.json: ${Math.round(Buffer.byteLength(tracksOut) / 1024)} KB raw / ${Math.round(tracksGz / 1024)} KB gzipped`)
     const per = {}
     for (const f of routeFeatures) per[f.properties.line] = (per[f.properties.line] ?? 0) + 1
     console.log('variants for:', ['S41', 'S42', 'S1', 'U1', 'U9', 'M5', 'M10', '12'].map(n => `${n}:${per[n] ?? 0}`).join('  '))
