@@ -182,12 +182,14 @@ describe('filterVehicles', () => {
     const out = filterVehicles(vs, {suburban: true, subway: true, tram: true}, new Set(['M10']))
     expect(out.map(x => x.line)).toEqual(['M10'])
   })
-  it('keeps everything when the line filter is empty', () => {
+  it('keeps nothing when the line filter is an empty set', () => {
+    // an empty selection matches nothing, mirroring the product filter, so the
+    // UI's "All lines" box can tick and untick every line like "All types" does
     const vs = [v('tram'), v('subway')]
     vs[0].line = 'M10'
     vs[1].line = 'U8'
     const out = filterVehicles(vs, {suburban: true, subway: true, tram: true}, new Set())
-    expect(out.length).toBe(2)
+    expect(out.length).toBe(0)
   })
 })
 

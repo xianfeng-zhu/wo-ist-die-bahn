@@ -92,9 +92,19 @@ map.on('moveend', () => {
 const markers = new Map<string, Marker>()
 /** Active product filter (one flag per mode; all on by default). */
 const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
-/** Active line-name filter (empty = all lines). */
+/**
+ * Active line-name selection. An EMPTY set means nothing is picked and so shows
+ * nothing, exactly as unticking every type does.
+ *
+ * `lineMode` tracks whether the user has narrowed it. In `'all'` the selection
+ * follows the network: every known line of every enabled type stays ticked, and
+ * a line discovered later joins it. That also keeps the app correct before
+ * tracks.json has loaded, when nothing is known yet.
+ */
 let lineFilter = new Set<string>()
-const visibleVehicles = () => filterVehicles(vehicles, filters, lineFilter)
+let lineMode: 'all' | 'custom' = 'all'
+const visibleVehicles = () =>
+  filterVehicles(vehicles, filters, lineMode === 'all' ? undefined : lineFilter)
 let vehicles: Vehicle[] = []
 let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
@@ -655,8 +665,13 @@ function describeTypes(): string {
   return on.map(p => PRODUCT_LABELS[p]).join(', ')
 }
 
+/** Lines that could be shown right now: those of the ticked types. */
+const selectableLines = (): string[] =>
+  [...knownLines].filter(([, p]) => filters[p]).map(([n]) => n)
+
 function describeLines(): string {
-  if (lineFilter.size === 0) return 'all'
+  if (lineMode === 'all') return 'all'
+  if (lineFilter.size === 0) return 'none'
   const names = [...lineFilter].sort(compareLineNames)
   return names.length <= 3 ? names.join(', ') : `${names.length} lines`
 }
@@ -695,10 +710,31 @@ function dropHiddenLines() {
   }
 }
 
+/** A line is ticked when the mode is `all`, or when it is in the selection. */
+const lineTicked = (name: string): boolean => lineMode === 'all' || lineFilter.has(name)
+
+/** Move to an explicit selection, seeded from whatever is ticked right now. */
+function makeSelectionExplicit() {
+  if (lineMode === 'custom') return
+  lineMode = 'custom'
+  lineFilter = new Set(selectableLines())
+}
+
 function rebuildLines() {
+  const all = selectableLines()
+  const everyOne = all.length > 0 && all.every(lineTicked)
   lineUi.body.replaceChildren(
-    checkRow('All lines', lineFilter.size === 0, on => {
-      if (on) lineFilter.clear()
+    // Ticks and unticks every line, like "All types" does for the types. Before,
+    // this only ticked itself: the selection meant "all" by being empty, so the
+    // line boxes stayed blank and unticking it did nothing.
+    checkRow('All lines', everyOne, on => {
+      if (on) {
+        lineMode = 'all'
+        lineFilter = new Set(all)
+      } else {
+        lineMode = 'custom'
+        lineFilter = new Set()
+      }
       rebuildLines()
       render()
     })
@@ -712,9 +748,12 @@ function rebuildLines() {
     head.textContent = PRODUCT_LABELS[p]
     lineUi.body.append(head)
     for (const n of names) {
-      lineUi.body.append(checkRow(n, lineFilter.has(n), on => {
+      lineUi.body.append(checkRow(n, lineTicked(n), on => {
+        makeSelectionExplicit()
         if (on) lineFilter.add(n)
         else lineFilter.delete(n)
+        // back to every line ticked: return to `all`, so a line added later joins
+        if (all.every(x => lineFilter.has(x))) lineMode = 'all'
         rebuildLines()
         render()
       }))

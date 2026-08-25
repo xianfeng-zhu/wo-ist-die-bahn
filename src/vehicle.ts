@@ -85,9 +85,16 @@ export function compareLineNames(a: string, b: string): number {
 
 export type Filters = Record<Product, boolean>
 
-/** Product + optional line-name filter (empty/omitted lines = all). */
+/**
+ * Product filter, plus an optional line-name filter.
+ *
+ * Omit `lines` for "no line filter". An EMPTY set means nothing is selected, and
+ * so matches nothing — it does not mean "all". That mirrors the product filter,
+ * where clearing every type also empties the map, and it lets the UI's "All
+ * lines" box tick and untick every line the way "All types" does.
+ */
 export function filterVehicles(vehicles: Vehicle[], filters: Filters, lines?: ReadonlySet<string>): Vehicle[] {
-  return vehicles.filter(v => filters[v.product] && (!lines || lines.size === 0 || lines.has(v.line)))
+  return vehicles.filter(v => filters[v.product] && (!lines || lines.has(v.line)))
 }
 
 export function productFromCls(cls: number | undefined): Product | null {
