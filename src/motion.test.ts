@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, impliedSpeed, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, MAX_HOLD_MS, REVERSE_MAX_SPEED, REVERSE_TAU_SEC, impliedSpeed, maxResidualM, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -105,23 +105,104 @@ describe('forwardStep', () => {
   const north = (m: number): [number, number] => [52.52 + m / 111320, 13.405]
 
   it('moves forward when the target is ahead', () => {
-    const next = forwardStep(p0, north(0.4), [1, 0], 16)
-    expect(next[0]).toBeGreaterThan(p0[0])
+    const r = forwardStep(p0, north(0.4), [1, 0], 16, 0)
+    expect(r.pos[0]).toBeGreaterThan(p0[0])
+    expect(r.held).toBe(false)
   })
 
   it('holds instead of reversing when the target is behind', () => {
-    // a poll corrected this badge backwards; it must not be dragged back
-    expect(forwardStep(north(10), north(4), [1, 0], 16)).toEqual(north(10))
+    const r = forwardStep(north(10), north(4), [1, 0], 16, 0)
+    expect(r.pos).toEqual(north(10))
+    expect(r.held).toBe(true)
   })
 
   it('moves freely when no heading is known yet', () => {
-    const next = forwardStep(north(10), north(4), null, 16)
-    expect(next[0]).toBeLessThan(north(10)[0])
+    const r = forwardStep(north(10), north(4), null, 16, 0)
+    expect(r.pos[0]).toBeLessThan(north(10)[0])
+    expect(r.held).toBe(false)
   })
 
   it('still rate-limits a forward correction', () => {
-    const far = north(4000)
-    expect(metresBetween(north(0), forwardStep(north(0), far, [1, 0], 16))).toBeLessThanOrEqual(CATCHUP_MAX_STEP + 1e-6)
+    const r = forwardStep(north(0), north(4000), [1, 0], 16, 0)
+    expect(metresBetween(north(0), r.pos)).toBeLessThanOrEqual(CATCHUP_MAX_STEP + 1e-6)
+  })
+
+  // The deadlock: a held badge does not move, so main.ts never refreshes its
+  // heading, so the hold can never end. Measured on live data: 8 of 8 vehicles
+  // caught mid-freeze were correcting, with gaps up to 5,697 m.
+  it('yields once it has been held for MAX_HOLD_MS', () => {
+    const r = forwardStep(north(10), north(4), [1, 0], 16, MAX_HOLD_MS)
+    expect(r.pos[0]).toBeLessThan(north(10)[0])
+    expect(r.held).toBe(false)
+  })
+
+  it('keeps holding while under the limit', () => {
+    expect(forwardStep(north(10), north(4), [1, 0], 16, MAX_HOLD_MS - 1).held).toBe(true)
+  })
+
+  it('cannot be held indefinitely by a target that stays behind it', () => {
+    let pos = north(10)
+    let heldMs = 0
+    const heading: [number, number] = [1, 0]
+    for (let i = 0; i < 1000; i++) {
+      const r = forwardStep(pos, north(4), heading, 16, heldMs)
+      heldMs = r.held ? heldMs + 16 : 0
+      pos = r.pos
+      if (!r.held) break
+    }
+    expect(pos[0]).toBeLessThan(north(10)[0])
+    expect(heldMs).toBeLessThanOrEqual(MAX_HOLD_MS)
+  })
+
+  it('yields SLOWLY, so a correction backwards is a settle and not a jerk', () => {
+    // yielding at the full correction rate produced 13 m single-frame reversals,
+    // measured at 53 per 100 s. A backwards step must stay well under the speed
+    // of traffic around it.
+    const r = forwardStep(north(100), north(0), [1, 0], 16, MAX_HOLD_MS)
+    const moved = metresBetween(north(100), r.pos)
+    expect(moved).toBeGreaterThan(0)
+    // proportional: a 100 m gap closes at 10 m/s, still 80x under the forward cap
+    expect(moved).toBeLessThanOrEqual((100 / REVERSE_TAU_SEC) * 0.016 + 1e-9)
+    const fwd = metresBetween(north(0), forwardStep(north(0), north(4000), [1, 0], 16, 0).pos)
+    expect(moved).toBeLessThan(fwd / 20)
+  })
+
+  it('lands exactly on a nearby target when yielding', () => {
+    const near = north(99.99)
+    expect(forwardStep(north(100), near, [1, 0], 1000, MAX_HOLD_MS).pos).toEqual(near)
+  })
+
+  it('reverses far more slowly than it advances', () => {
+    const fwd = metresBetween(north(0), forwardStep(north(0), north(500), [1, 0], 100, 0).pos)
+    const back = metresBetween(north(100), forwardStep(north(100), north(0), [1, 0], 100, MAX_HOLD_MS).pos)
+    expect(back).toBeLessThan(fwd / 10)
+  })
+
+  it('corrects even a gross error rather than leaving it in place for minutes', () => {
+    // 6 km was a real gap before the hold was time-boxed. A flat reverse speed
+    // would take half an hour; proportional closing must do it in seconds.
+    let pos = north(6000)
+    let heldMs = 0
+    let heading: [number, number] | null = [1, 0]
+    let ms = 0
+    while (ms < 60000 && metresBetween(pos, north(0)) > 5) {
+      const r = forwardStep(pos, north(0), heading, 16, heldMs)
+      heldMs = r.held ? heldMs + 16 : 0
+      if (!r.held && metresBetween(pos, r.pos) >= 0.3) {
+        heading = [r.pos[0] - pos[0], r.pos[1] - pos[1]]
+      }
+      pos = r.pos
+      ms += 16
+    }
+    expect(metresBetween(pos, north(0))).toBeLessThanOrEqual(5)
+    expect(ms).toBeLessThan(60000)
+  })
+
+  it('keeps an ordinary-sized correction gentle', () => {
+    // drift p90 is ~35 m: this is the common case and must stay near the floor
+    const moved = metresBetween(north(35), forwardStep(north(35), north(0), [1, 0], 16, MAX_HOLD_MS).pos)
+    expect(moved).toBeLessThanOrEqual((REVERSE_MAX_SPEED + 35 / REVERSE_TAU_SEC) * 0.016)
+    expect(moved).toBeLessThan(0.3) // under the recorder's noise floor, so it reads as a settle
   })
 })
 
@@ -273,5 +354,73 @@ describe('alongAt', () => {
   })
   it('returns 0 for an empty forecast', () => {
     expect(alongAt([], [], 1000, total)).toBe(0)
+  })
+})
+
+describe('maxResidualM', () => {
+  const straight: Array<[number, number]> = [[52.5, 13.4], [52.51, 13.4]]
+
+  it('is zero for points that sit on the path', () => {
+    expect(maxResidualM(straight, [[52.505, 13.4]])).toBeCloseTo(0, 6)
+  })
+
+  it('reports the worst offset, not the average', () => {
+    const east = 13.4 + 100 / (111320 * Math.cos(52.5 * Math.PI / 180))
+    expect(maxResidualM(straight, [[52.505, 13.4], [52.506, east]])).toBeCloseTo(100, 0)
+  })
+
+  it('is zero for an empty point list', () => {
+    expect(maxResidualM(straight, [])).toBe(0)
+  })
+})
+
+describe('maxResidualM', () => {
+  const mLat = (x: number) => x / 111320
+  const mLon = (x: number) => x / (111320 * Math.cos((52.5 * Math.PI) / 180))
+  const track: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(1000), 13.4]]
+
+  it('returns 0 for points on the path and for an empty list', () => {
+    expect(maxResidualM(track, [[52.5 + mLat(500), 13.4]])).toBeCloseTo(0, 3)
+    expect(maxResidualM(track, [])).toBe(0)
+  })
+
+  it('grows with the offset from the path', () => {
+    const near = maxResidualM(track, [[52.5 + mLat(500), 13.4 + mLon(40)]])
+    const far = maxResidualM(track, [[52.5 + mLat(500), 13.4 + mLon(400)]])
+    expect(far).toBeGreaterThan(near)
+    expect(near).toBeGreaterThan(0)
+  })
+
+  it('reports the worst offset, not the average', () => {
+    const one = maxResidualM(track, [[52.5 + mLat(500), 13.4 + mLon(100)]])
+    const withClean = maxResidualM(track, [[52.5 + mLat(400), 13.4], [52.5 + mLat(500), 13.4 + mLon(100)]])
+    expect(withClean).toBeCloseTo(one, 6)
+  })
+
+  // The invariant that matters: the residual is measured to the SAME point that
+  // projectOntoPath returns, because buildSegmentPath slices there and
+  // alongsOnPath paces from there. A more accurate metric that disagreed with the
+  // projection measured worse on every axis -- see the note on maxResidualM.
+  it('agrees with the projection used for slicing and pacing', () => {
+    const oblique: Array<[number, number]> = [[52.5, 13.4], [52.5 + mLat(800), 13.4 + mLon(600)]]
+    for (const pt of [
+      [52.5 + mLat(300), 13.4 + mLon(90)] as [number, number],
+      [52.5 + mLat(700), 13.4 + mLon(120)] as [number, number],
+      [52.5 - mLat(200), 13.4 + mLon(50)] as [number, number]
+    ]) {
+      const foot = projectOntoPath(oblique, {lat: pt[0], lon: pt[1]}).point
+      expect(maxResidualM(oblique, [pt])).toBeCloseTo(metresBetween(pt, foot), 9)
+    }
+  })
+
+  it('stops early once it is already worse than the limit', () => {
+    const long: Array<[number, number]> = []
+    for (let i = 0; i < 500; i++) long.push([52.5 + mLat(i * 10), 13.4])
+    expect(maxResidualM(long, [[52.6, 13.5]], 100)).toBeGreaterThan(100)
+  })
+
+  it('is unaffected by a limit it never reaches', () => {
+    const pts: Array<[number, number]> = [[52.5 + mLat(500), 13.4 + mLon(40)]]
+    expect(maxResidualM(track, pts, 1000)).toBeCloseTo(maxResidualM(track, pts), 6)
   })
 })

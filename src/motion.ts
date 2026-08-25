@@ -42,6 +42,8 @@ export interface AnimState {
   correcting?: boolean
   /** Last direction the badge actually moved, so it can never be dragged back. */
   heading?: [number, number]
+  /** How long `forwardStep` has been blocking movement (see MAX_HOLD_MS). */
+  heldMs?: number
 }
 
 /**
@@ -54,6 +56,44 @@ export const COAST_GRACE_MS = 5000
 /** Metres between two lat/lon points (local flat approximation). */
 export function metresBetween(a: [number, number], b: [number, number]): number {
   return Math.hypot((a[0] - b[0]) * 111320, (a[1] - b[1]) * 111320 * Math.cos(a[0] * Math.PI / 180))
+}
+
+/**
+ * Worst distance from any point in `pts` to `path`, in metres. `limit` lets a
+ * caller abandon a candidate as soon as it cannot win: a candidate already worse
+ * than the incumbent could never win, so this is exact, not approximate.
+ *
+ * Deliberately goes through `projectOntoPath`, which finds its nearest point in
+ * DEGREE space (1 deg of longitude treated as 1 deg of latitude, where at Berlin
+ * longitude is 0.61 of that). That foot point is NOT the true nearest one, so the
+ * result overstates the real distance by a mean 1.8 m and up to 7.5 m, varying
+ * with the segment's bearing.
+ *
+ * That looks like a bug and it was fixed once — measuring true perpendicular
+ * metres instead — and the fix measured WORSE on every axis: drift p90 26 -> 50 m,
+ * reversals 5.9 -> 13.6 per 100 s, overspeed 0 -> 3, badFit 0.14% -> 0.38%
+ * (same hour, same shapes, only the metric changed).
+ *
+ * The reason is CONSISTENCY, not accuracy. `buildSegmentPath` slices with
+ * `projectOntoPath`, and `alongsOnPath`/`total` parameterise the result the same
+ * way. Selecting a variant with a different metric picks the shape that fits best
+ * by one measure and then paces it by another. Both must move together or not at
+ * all — see AGENTS.md before "fixing" this.
+ *
+ * Worst, not average: one point kilometres off means the wrong track, however
+ * well the rest happens to line up.
+ */
+export function maxResidualM(
+  path: Array<[number, number]>,
+  pts: Array<[number, number]>,
+  limit = Infinity
+): number {
+  let worst = 0
+  for (const pt of pts) {
+    worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
+    if (worst > limit) return worst
+  }
+  return worst
 }
 
 /**
@@ -89,24 +129,77 @@ export function stepTowards(from: [number, number], to: [number, number], dtMs: 
 }
 
 /**
- * Move `from` toward `to`, but never against `heading`.
+ * Longest a forward-only hold may block movement.
+ *
+ * Without a limit the hold is a deadlock: a held badge does not move, so the
+ * caller never refreshes its `heading` (it only updates on a move of >= 0.3 m),
+ * so the hold can never end. The only escape was the target coming round to the
+ * front again — on a ring line, a whole lap. Measured before this limit existed:
+ * 33.5% of vehicle-samples were still while the operator's forecast said they
+ * were moving, and all 8 vehicles caught mid-freeze were correcting, with gaps
+ * between drawn and computed position of up to 5,697 m.
+ *
+ * 2 s reads as a pause rather than a fault. Raising it to 6 s was measured and
+ * was WORSE: it let a bigger gap build up first, so reversals went from 25 to 53
+ * per 100 s. The duration is not the lever — the yield rate is.
+ */
+export const MAX_HOLD_MS = 2000
+
+/**
+ * Floor on how fast the badge may move BACKWARDS once a hold yields (m/s).
+ *
+ * Yielding at the normal correction rate produced 13 m single-frame reversals,
+ * 53 per 100 s — a visible jerk. 3 m/s is far below the ~10 m/s of the traffic
+ * around it, so an ordinary backwards correction reads as the badge settling
+ * into place. Drift p90 is ~35 m, so the common case closes in about 12 s.
+ */
+export const REVERSE_MAX_SPEED = 3
+
+/**
+ * Time constant for a backwards correction, so a gross error is not left in
+ * place for minutes. A flat 3 m/s would take half an hour to undo a 6 km gap —
+ * and gaps that size did occur before the hold was time-boxed. Proportional
+ * closing keeps small errors gentle and large ones prompt; `CATCHUP_MAX_STEP`
+ * still bounds any single frame.
+ */
+export const REVERSE_TAU_SEC = 10
+
+/**
+ * Move `from` toward `to`, but not against `heading` — unless the hold has
+ * already lasted `MAX_HOLD_MS`, in which case yield rather than deadlock.
  *
  * `stepTowards` has no sense of direction: when a poll corrects a badge to a
  * position BEHIND it, easing there drags it backwards. `drawnAlong` keeps
  * progress monotonic along one path, but a path swap re-projects the position,
- * so the guarantee has to be repeated here in position space. Holding until the
- * correction moves ahead reads as a pause; reversing reads as a bug.
+ * so the guarantee has to be repeated here in position space. Holding briefly
+ * reads as a pause, reversing reads as a bug, and holding forever is worse than
+ * either.
+ *
+ * Returns `held` so the caller can accumulate `AnimState.heldMs`.
  */
 export function forwardStep(
   from: [number, number],
   to: [number, number],
   heading: [number, number] | null,
-  dtMs: number
-): [number, number] {
+  dtMs: number,
+  heldMs = 0
+): {pos: [number, number]; held: boolean} {
   const next = stepTowards(from, to, dtMs)
-  if (!heading) return next
+  if (!heading) return {pos: next, held: false}
   const move: [number, number] = [next[0] - from[0], next[1] - from[1]]
-  return heading[0] * move[0] + heading[1] * move[1] < 0 ? from : next
+  const backwards = heading[0] * move[0] + heading[1] * move[1] < 0
+  if (!backwards) return {pos: next, held: false}
+  if (heldMs < MAX_HOLD_MS) return {pos: from, held: true}
+  // Held long enough that holding is now the worse fault. Give way, but at
+  // REVERSE_MAX_SPEED: the drawn position IS wrong and has to be corrected, and
+  // a slow settle backwards reads far better than a jerk.
+  const gap = metresBetween(from, to)
+  const dtSec = Math.max(0, dtMs) / 1000
+  const speed = Math.max(REVERSE_MAX_SPEED, gap / REVERSE_TAU_SEC)
+  const budget = Math.min(speed * dtSec, CATCHUP_MAX_STEP)
+  if (gap === 0 || gap <= budget) return {pos: to, held: false}
+  const f = budget / gap
+  return {pos: [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f], held: false}
 }
 
 /** Distance in metres along a path of lat/lon points. */

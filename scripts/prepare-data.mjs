@@ -19,6 +19,8 @@ import {createInterface} from 'node:readline'
 import {execSync} from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
+import {simplifyPath} from './simplify.mjs'
 
 const TMP = mkdtempSync(path.join(os.tmpdir(), 'vbb-'))
 const run = c => execSync(c, {stdio: 'inherit', cwd: TMP})
@@ -150,35 +152,116 @@ try {
   }
   console.log(`rail stops with coords: ${stopById.size}`)
 
-  // ---- routes.json: one LineString per line name, from the longest shape ----
-  const lineBest = new Map() // shortName -> {product, pts}
+  // ---- inventory report: how many distinct variants per line, and at what cost? ----
+  // Writes nothing. Payload size is the deciding constraint for shipping every
+  // variant, so measure it before changing any output.
+  {
+    const perLine = new Map() // shortName -> Set(shapeId)
+    for (const [routeId, {shortName}] of railRoutes) {
+      for (const t of routeTrips.get(routeId) ?? []) {
+        if (!t.shapeId || !shapePts.has(t.shapeId)) continue
+        if (!perLine.has(shortName)) perLine.set(shortName, new Set())
+        perLine.get(shortName).add(t.shapeId)
+      }
+    }
+    const counts = [...perLine].map(([l, s]) => [l, s.size]).sort((a, b) => b[1] - a[1])
+    const totalShapes = counts.reduce((n, [, c]) => n + c, 0)
+    let rawPts = 0
+    let simpPts = 0
+    for (const s of perLine.values()) {
+      for (const id of s) {
+        const pts = shapePts.get(id)
+        rawPts += pts.length
+        simpPts += simplifyPath(pts, 10).length
+      }
+    }
+    console.log(`\n--- shape inventory`)
+    console.log(`  distinct shapes across rail lines: ${totalShapes} (across ${perLine.size} lines)`)
+    console.log(`  points: ${rawPts.toLocaleString('en-US')} raw -> ${simpPts.toLocaleString('en-US')} simplified at 10 m`)
+    console.log(`  most variants: ${counts.slice(0, 8).map(([l, c]) => `${l}:${c}`).join('  ')}`)
+    console.log(`  median variants per line: ${counts[Math.floor(counts.length / 2)]?.[1]}\n`)
+  }
+
+  // ---- routes.json: every distinct route variant per line ----
+  // One shape per line NAME was the old behaviour and the root cause of the
+  // runtime fit guards in main.ts: branch variants (S1, M5, tram 12) and the two
+  // ring directions (S41/S42) do not share geometry, so projecting a vehicle
+  // onto the wrong one landed it up to 6.5 km away. Ship them all; the runtime
+  // picks by forecast fit (see track.ts pickShape).
+  //
+  // GTFS has 2,179 distinct rail shape_ids, far too many to ship (117k points
+  // simplified). Most are the same corridor recorded per service pattern, so
+  // collapse by corridor first, then cap.
+  const SIMPLIFY_M = 10
+  const MAX_VARIANTS_PER_LINE = 12
+
+  /**
+   * Corridor fingerprint: the route sampled at 12 fractions, rounded to ~100 m.
+   * Two trips over the same track get the same key however their shape_ids or
+   * point counts differ. Deliberately NOT keyed on point count — that was an
+   * early mistake: it made near-duplicates look distinct, which is the opposite
+   * of what this is for.
+   */
+  const corridorKey = pts => {
+    const k = []
+    for (let i = 0; i < 12; i++) {
+      const p = pts[Math.round((i / 11) * (pts.length - 1))]
+      k.push(`${p[0].toFixed(3)},${p[1].toFixed(3)}`) // 3 dp ~ 100 m
+    }
+    return k.join(';')
+  }
+
+  const lineVariants = new Map() // shortName -> {product, corridors: Map(key -> pts)}
+  let seenShapes = 0
   for (const [routeId, {shortName, product}] of railRoutes) {
     for (const t of routeTrips.get(routeId) ?? []) {
-      const pts = t.shapeId ? shapePts.get(t.shapeId) : undefined
-      if (!pts || pts.length < 2) continue
-      const cur = lineBest.get(shortName)
-      if (!cur || pts.length > cur.pts.length) lineBest.set(shortName, {product, pts})
+      const raw = t.shapeId ? shapePts.get(t.shapeId) : undefined
+      if (!raw || raw.length < 2) continue
+      const deduped = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1])
+      if (deduped.length < 2) continue
+      seenShapes++
+      const pts = simplifyPath(deduped, SIMPLIFY_M)
+      if (!lineVariants.has(shortName)) lineVariants.set(shortName, {product, corridors: new Map()})
+      const c = lineVariants.get(shortName).corridors
+      const key = corridorKey(pts)
+      // keep the longest of each corridor group: it covers the most track, so a
+      // vehicle near either end still projects onto it
+      const cur = c.get(key)
+      if (!cur || pts.length > cur.length) c.set(key, pts)
     }
   }
 
-  const decimate = (pts, max) => {
-    if (pts.length <= max) return pts
-    const step = (pts.length - 1) / (max - 1)
+  const toFeature = (line, product, pts) => ({
+    type: 'Feature',
+    geometry: {type: 'LineString', coordinates: pts.map(([lat, lon]) => [lon, lat])},
+    properties: {line, product}
+  })
+
+  // Report the cost at several caps, so the cap can be tuned without another
+  // 600 MB GTFS download.
+  const sortedLines = [...lineVariants.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  const buildAt = cap => {
     const out = []
-    for (let i = 0; i < max; i++) out.push(pts[Math.round(i * step)])
+    for (const [line, {product, corridors}] of sortedLines) {
+      const kept = [...corridors.values()].sort((a, b) => b.length - a.length).slice(0, cap)
+      for (const pts of kept) out.push(toFeature(line, product, pts))
+    }
     return out
   }
-
-  const routeFeatures = []
-  for (const [line, {product, pts}] of [...lineBest.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const deduped = pts.filter((p, i) => i === 0 || p[0] !== pts[i - 1][0] || p[1] !== pts[i - 1][1])
-    const kept = decimate(deduped, 500)
-    routeFeatures.push({
-      type: 'Feature',
-      geometry: {type: 'LineString', coordinates: kept.map(([lat, lon]) => [lon, lat])},
-      properties: {line, product}
-    })
+  const corridorTotal = sortedLines.reduce((n, [, v]) => n + v.corridors.size, 0)
+  console.log(`--- corridor dedupe: ${seenShapes} shapes -> ${corridorTotal} corridors across ${sortedLines.length} lines`)
+  const worstLines = sortedLines.map(([l, v]) => [l, v.corridors.size]).sort((a, b) => b[1] - a[1])
+  console.log(`  most corridors: ${worstLines.slice(0, 8).map(([l, c]) => `${l}:${c}`).join('  ')}`)
+  console.log(`  cap  variants   raw KB   gzip KB`)
+  for (const cap of [4, 6, 8, 12, 16, 9999]) {
+    const f = buildAt(cap)
+    const json = JSON.stringify({type: 'FeatureCollection', features: f})
+    const gz = zlib.gzipSync(json).length
+    console.log(`  ${String(cap === 9999 ? 'all' : cap).padStart(4)} ${String(f.length).padStart(9)} ${String(Math.round(Buffer.byteLength(json) / 1024)).padStart(8)} ${String(Math.round(gz / 1024)).padStart(9)}`)
   }
+
+  const routeFeatures = buildAt(MAX_VARIANTS_PER_LINE)
+  console.log(`route variants shipped: ${routeFeatures.length} (cap ${MAX_VARIANTS_PER_LINE} per line)`)
 
   // ---- stations.json: Point per rail stop ----
   const stationFeatures = [...stopById.entries()]
@@ -218,13 +301,30 @@ try {
   ].join('\n') + '\n'
 
   // ---- sanity gates (BEFORE any write: never overwrite committed assets with bad data) ----
-  const lineNames = routeFeatures.map(f => f.properties.line)
+  // routeFeatures now holds several variants per line, so line-level checks work
+  // on the distinct set while size checks work on the whole payload.
+  const lineNames = [...new Set(routeFeatures.map(f => f.properties.line))]
   const bad = lineNames.filter(n => /^(RE|RB|FEX|ICE)/.test(n))
-  const tramLines = lineNames.filter(n => lineBest.get(n).product === 'tram')
+  const tramLines = lineNames.filter(n => lineVariants.get(n).product === 'tram')
   const missingU = ['U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9'].filter(n => !lineNames.includes(n))
+  const routesOut = JSON.stringify(routesJson)
+  const routesGz = zlib.gzipSync(routesOut).length
+  // Gates need FLOORS, not just ceilings. Collapsing every shape to its two
+  // endpoints -- the symptom of a units or tolerance bug in SIMPLIFY_M or the
+  // distance metric -- passed every earlier gate at 4.7 KB against a real 54 KB,
+  // and would have shipped straight chords for the whole network. Verified by
+  // deliberate sabotage: it now FAILS and routes.json is left untouched.
+  const allCoords = routeFeatures.flatMap(f => f.geometry.coordinates)
+  const inBerlin = ([lon, lat]) => Number.isFinite(lat) && Number.isFinite(lon) &&
+    lat > 51.8 && lat < 53.2 && lon > 12.5 && lon < 14.5
+  const meanPts = allCoords.length / Math.max(1, routeFeatures.length)
   const checks = [
     ['stations in low thousands', stationFeatures.length >= 500 && stationFeatures.length <= 15000],
-    ['routes 40-60', routeFeatures.length >= 40 && routeFeatures.length <= 60],
+    ['lines 40-60', lineNames.length >= 40 && lineNames.length <= 60],
+    ['route variants 60-900', routeFeatures.length >= 60 && routeFeatures.length <= 900],
+    ['shapes carry real geometry (mean >=15 pts)', meanPts >= 15],
+    ['routes.json 20-250 KB gzipped', routesGz >= 20 * 1024 && routesGz <= 250 * 1024],
+    ['all coordinates finite and inside Berlin', allCoords.every(inBerlin)],
     ['no RE/RB/FEX/ICE routes', bad.length === 0],
     ['S41/S42 present', lineNames.includes('S41') && lineNames.includes('S42')],
     ['U1-U9 present', missingU.length === 0],
@@ -237,10 +337,13 @@ try {
   } else {
     mkdirSync('public', {recursive: true})
     writeFileSync(path.join('public', 'stations.json'), JSON.stringify(stationsJson))
-    writeFileSync(path.join('public', 'routes.json'), JSON.stringify(routesJson))
+    writeFileSync(path.join('public', 'routes.json'), routesOut)
     writeFileSync(path.join('src', 'line-colors.ts'), colorsTs)
-    console.log(`stations: ${stationFeatures.length} · routes: ${routeFeatures.length} · lineColors: ${colorEntries.length}`)
-    console.log('sample lines:', lineNames.filter(n => ['S41', 'S42', 'U1', 'U9', 'M1', 'M10', '12'].includes(n)).join(', '))
+    console.log(`stations: ${stationFeatures.length} · route variants: ${routeFeatures.length} across ${lineNames.length} lines · lineColors: ${colorEntries.length}`)
+    console.log(`routes.json: ${Math.round(Buffer.byteLength(routesOut) / 1024)} KB raw / ${Math.round(routesGz / 1024)} KB gzipped`)
+    const per = {}
+    for (const f of routeFeatures) per[f.properties.line] = (per[f.properties.line] ?? 0) + 1
+    console.log('variants for:', ['S41', 'S42', 'S1', 'U1', 'U9', 'M5', 'M10', '12'].map(n => `${n}:${per[n] ?? 0}`).join('  '))
   }
 } finally {
   rmSync(TMP, {recursive: true, force: true})

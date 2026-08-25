@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAlong, AnimState, forwardStep, impliedSpeed, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
+import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
 import type {FrameEntry} from './recorder.js'
@@ -174,11 +174,12 @@ function popupHtml(v: Vehicle): string {
  */
 const SHAPE_FIT_LIMIT_M = 250
 
-const maxResidualM = (path: Array<[number, number]>, pts: Array<[number, number]>): number => {
-  let worst = 0
-  for (const pt of pts) worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
-  return worst
-}
+/**
+ * How often the fit/speed guards rejected the GTFS track, so the effect of
+ * shipping per-variant shapes can be measured rather than assumed. Read it from
+ * `window.__lb.guardStats`.
+ */
+const guardStats = {rebuilds: 0, badFit: 0, tooFast: 0}
 
 /** Forecast points -> distance along `path`, forced non-decreasing so a point
  *  that projects backwards (a curve doubling back) cannot stall the motion. */
@@ -210,18 +211,24 @@ function updateSegment(v: Vehicle, m: Marker) {
     return
   }
   const start = {lat: f.pts[0][0], lon: f.pts[0][1]}
-  let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon})
-  // Does that GTFS track actually pass through the forecast? prepare-data.mjs
-  // keeps one shape per line (the longest), so branch variants (S1, M5, tram 12)
-  // do not match and projection would snap kilometres away. When it doesn't fit,
-  // follow the operator's own forecast points instead of a wrong track.
+  let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon}, f.pts)
+  // Does the chosen GTFS track actually pass through the forecast? pickShape
+  // takes the best of the line's variants, but a line can still be missing the
+  // exact variant this vehicle is on (prepare-data.mjs caps how many it ships).
+  // When nothing fits, follow the operator's own forecast points instead of a
+  // wrong track.
   const badFit = () => maxResidualM(path, f.pts) > SHAPE_FIT_LIMIT_M
   const tooFast = () => {
     const a = alongsOnPath(path, f.pts)
     const t = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
     return impliedSpeed(f.ms, a, t, path) > SPEED_SANITY_MPS
   }
-  if (badFit() || tooFast()) {
+  guardStats.rebuilds++
+  const unfit = badFit()
+  const fast = !unfit && tooFast()
+  if (unfit) guardStats.badFit++
+  if (fast) guardStats.tooFast++
+  if (unfit || fast) {
     // Wrong track: either the forecast does not lie on it, or following it
     // would need an impossible speed (a shape that takes the long way round, or
     // a ring line where projection wraps). Follow the forecast points, then
@@ -243,6 +250,7 @@ function updateSegment(v: Vehicle, m: Marker) {
     drawnT: Date.now(),
     renderPos: prev?.renderPos, // keep what is on screen; frame() glides to the fix
     heading: prev?.heading,     // and keep its direction, so it is never dragged back
+    heldMs: prev?.heldMs,       // and how long it has been stalled, so a hold cannot restart forever
     reportT: Date.now(),
     ms: f.ms,
     alongs,
@@ -296,7 +304,15 @@ function frame(rafNow: number) {
       s.drawnT = now
       const target = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
       const from = s.renderPos
-      s.renderPos = from ? forwardStep(from, target, s.heading ?? null, dtMs) : target
+      if (from) {
+        const step = forwardStep(from, target, s.heading ?? null, dtMs, s.heldMs ?? 0)
+        s.renderPos = step.pos
+        // reset on any move, so the allowance is per stall rather than cumulative
+        s.heldMs = step.held ? (s.heldMs ?? 0) + dtMs : 0
+      } else {
+        s.renderPos = target
+        s.heldMs = 0
+      }
       if (from && metresBetween(from, s.renderPos) >= 0.3) {
         s.heading = [s.renderPos[0] - from[0], s.renderPos[1] - from[1]]
       }
@@ -420,9 +436,10 @@ async function loadNetworkLayers() {
     for (const f of routes.features ?? []) {
       const line = f.properties?.line
       const coords = f.geometry?.coordinates
-      if (line && Array.isArray(coords)) {
-        // GeoJSON [lon, lat] -> [lat, lon]
-        lineShapes[line] = coords.map((c: [number, number]) => [c[1], c[0]])
+      if (line && Array.isArray(coords) && coords.length >= 2) {
+        // Several features share a line name — one per route variant — so collect
+        // them all. GeoJSON [lon, lat] -> [lat, lon].
+        ;(lineShapes[line] ??= []).push(coords.map((c: [number, number]) => [c[1], c[0]]))
       }
     }
     // TESTING: routes layer disabled — only targets render
@@ -648,6 +665,7 @@ filterEl.append(recRow)
   animStates,
   get vehicles() { return vehicles },
   get lineShapes() { return lineShapes },
+  get guardStats() { return guardStats },
   get logs() { return logs },
   get recorder() { return recorder },
   startRecording: (hz = TRACE_HZ) => { recorder = new MotionRecorder(Date.now(), Math.round(1000 / hz))
