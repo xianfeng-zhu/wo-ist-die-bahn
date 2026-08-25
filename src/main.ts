@@ -353,12 +353,21 @@ const ZOOM_WIDTH = (full: number) =>
   ['interpolate', ['linear'], ['zoom'], 10, full * 0.35, LABEL_MIN_ZOOM, full] as unknown as number
 function addTargetsLayers() {
   map.addSource('targets', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
+  /*
+   * These paths are one per VEHICLE, not one per route, so on a shared corridor
+   * they stack as deep as the traffic on it. With ~270 vehicles that merges into
+   * a solid orange band below about z13, which hides the very thing it is drawn
+   * to show. Hidden below the same threshold the badges use for dense mode; the
+   * target dots stay, because discrete points do not smear. Narrow with the Lines
+   * box when a single corridor is still too busy.
+   */
   // white casing underneath for contrast on any map background
   map.addLayer({
     id: 'anim-paths-casing',
     type: 'line',
     source: 'targets',
     filter: LINES_ONLY,
+    minzoom: LABEL_MIN_ZOOM,
     paint: {'line-color': '#ffffff', 'line-width': ZOOM_WIDTH(7), 'line-opacity': 0.9}
   })
   map.addLayer({
@@ -366,6 +375,7 @@ function addTargetsLayers() {
     type: 'line',
     source: 'targets',
     filter: LINES_ONLY,
+    minzoom: LABEL_MIN_ZOOM,
     paint: {'line-color': '#ff6d00', 'line-width': ZOOM_WIDTH(3.5), 'line-opacity': 0.95}
   })
   map.addLayer({
@@ -438,9 +448,25 @@ async function loadNetworkLayers() {
       id: 'routes-layer',
       type: 'line',
       source: 'routes',
-      // Several variants of a line overlap, so a solid line would stack up to a
-      // dozen deep and read as a thick smear. Thin and faint keeps it a backdrop.
-      paint: {'line-color': ['get', 'color'], 'line-width': 1.5, 'line-opacity': 0.35}
+      /*
+       * Route lines are context, not the subject. Two things make them heavy, and
+       * both get worse as you zoom out:
+       *  - a line has up to 12 route variants, and they share a trunk. Stacked
+       *    strokes compound their opacity, so a shared street goes almost solid.
+       *    Dropping variants contained in a longer one only takes 533 features to
+       *    302 — trams really do have a dozen distinct ones — so no amount of
+       *    feature dedupe fixes it.
+       *  - below ~z11 the whole tram network falls inside a few hundred pixels,
+       *    where even one stroke per route would be an unreadable mass.
+       * So the lines fade in as you zoom in, and are simply absent city-wide,
+       * which is the zoom where you want to see vehicles on a clean map.
+       */
+      minzoom: 11,
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.6, 14, 1.5, 16, 2.2],
+        'line-opacity': ['interpolate', ['linear'], ['zoom'], 11, 0.12, 13, 0.28, 15, 0.4]
+      }
     }, belowDebug())
   } catch (err) {
     logError(`routes.json unavailable (animation falls back to straight lines): ${err instanceof Error ? err.message : String(err)}`)
