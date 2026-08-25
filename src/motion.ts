@@ -57,6 +57,19 @@ export function metresBetween(a: [number, number], b: [number, number]): number 
 }
 
 /**
+ * Worst distance from any point in `pts` to `path`, in metres.
+ *
+ * Used both to choose between route variants and to reject a track the forecast
+ * does not lie on. Worst, not average: one point kilometres off means the wrong
+ * track, however well the rest happens to line up.
+ */
+export function maxResidualM(path: Array<[number, number]>, pts: Array<[number, number]>): number {
+  let worst = 0
+  for (const pt of pts) worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
+  return worst
+}
+
+/**
  * Fastest the drawn position may be dragged toward a corrected one. Far above
  * any real vehicle (~1440 km/h) so normal motion lands exactly on target with
  * no lag, but slow enough that a correction is a glide rather than a blink:

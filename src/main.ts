@@ -4,7 +4,7 @@ import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
 import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
-import {advanceAlong, AnimState, forwardStep, impliedSpeed, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
+import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
 import type {FrameEntry} from './recorder.js'
@@ -174,11 +174,12 @@ function popupHtml(v: Vehicle): string {
  */
 const SHAPE_FIT_LIMIT_M = 250
 
-const maxResidualM = (path: Array<[number, number]>, pts: Array<[number, number]>): number => {
-  let worst = 0
-  for (const pt of pts) worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
-  return worst
-}
+/**
+ * How often the fit/speed guards rejected the GTFS track, so the effect of
+ * shipping per-variant shapes can be measured rather than assumed. Read it from
+ * `window.__lb.guardStats`.
+ */
+const guardStats = {rebuilds: 0, badFit: 0, tooFast: 0}
 
 /** Forecast points -> distance along `path`, forced non-decreasing so a point
  *  that projects backwards (a curve doubling back) cannot stall the motion. */
@@ -221,7 +222,12 @@ function updateSegment(v: Vehicle, m: Marker) {
     const t = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
     return impliedSpeed(f.ms, a, t, path) > SPEED_SANITY_MPS
   }
-  if (badFit() || tooFast()) {
+  guardStats.rebuilds++
+  const unfit = badFit()
+  const fast = !unfit && tooFast()
+  if (unfit) guardStats.badFit++
+  if (fast) guardStats.tooFast++
+  if (unfit || fast) {
     // Wrong track: either the forecast does not lie on it, or following it
     // would need an impossible speed (a shape that takes the long way round, or
     // a ring line where projection wraps). Follow the forecast points, then
@@ -648,6 +654,7 @@ filterEl.append(recRow)
   animStates,
   get vehicles() { return vehicles },
   get lineShapes() { return lineShapes },
+  get guardStats() { return guardStats },
   get logs() { return logs },
   get recorder() { return recorder },
   startRecording: (hz = TRACE_HZ) => { recorder = new MotionRecorder(Date.now(), Math.round(1000 / hz))

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, impliedSpeed, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, impliedSpeed, maxResidualM, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -273,5 +273,22 @@ describe('alongAt', () => {
   })
   it('returns 0 for an empty forecast', () => {
     expect(alongAt([], [], 1000, total)).toBe(0)
+  })
+})
+
+describe('maxResidualM', () => {
+  const straight: Array<[number, number]> = [[52.5, 13.4], [52.51, 13.4]]
+
+  it('is zero for points that sit on the path', () => {
+    expect(maxResidualM(straight, [[52.505, 13.4]])).toBeCloseTo(0, 6)
+  })
+
+  it('reports the worst offset, not the average', () => {
+    const east = 13.4 + 100 / (111320 * Math.cos(52.5 * Math.PI / 180))
+    expect(maxResidualM(straight, [[52.505, 13.4], [52.506, east]])).toBeCloseTo(100, 0)
+  })
+
+  it('is zero for an empty point list', () => {
+    expect(maxResidualM(straight, [])).toBe(0)
   })
 })
