@@ -120,9 +120,25 @@ body.dense .vid { display: none; }
   body.compact.settings-open #filters { top: 56px; right: 8px; left: 8px; max-width: none; }
 }
 
-/* Type / Line dropdowns. Wide enough for "All types" and the longest line name. */
-#filters .mode select {
-  font: 12px system-ui; padding: 1px 4px; min-width: 96px;
-  border: 1px solid #999; border-radius: 3px; background: #fff;
+/*
+ * Type / Line multi-selects. A <details> holding a checkbox list, not a
+ * <select multiple>: that needs ctrl/cmd-click for a second choice and is close
+ * to unusable on touch. The summary carries the current choice, so the panel
+ * stays one line per filter until you open it.
+ */
+#filters .multi { margin-bottom: 6px; }
+#filters .multi > summary {
+  cursor: pointer; padding: 2px 4px; border-radius: 3px;
+  border: 1px solid #999; background: #fff; list-style-position: inside;
 }
-#filters .mode label { display: flex; align-items: center; gap: 4px; }
+#filters .multi > summary:hover { background: #f4f4f4; }
+#filters .multi-caption { color: #333; font-weight: 600; }
+/* the long line list must scroll rather than push the panel off-screen */
+#filters .multi-body {
+  max-height: 210px; overflow: auto;
+  margin: 4px 0 0 2px; padding-left: 4px; border-left: 2px solid #eee;
+}
+#filters .multi-group {
+  margin: 4px 0 1px; color: #666; font: 600 10px system-ui;
+  text-transform: uppercase; letter-spacing: .04em;
+}

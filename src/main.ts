@@ -584,17 +584,20 @@ setSettingsOpen(false)
 // tapping the map dismisses the panel, like any other overlay
 map.on('click', () => { if (document.body.classList.contains('settings-open')) setSettingsOpen(false) })
 /*
- * Two dropdowns: pick a type, then a line within it.
+ * Two multi-select dropdowns: pick any set of types, then any set of lines.
  *
- * This replaced three checkboxes plus a free-text box. The text box needed you to
- * know a line's exact name and spell it (`M10, U8`), and told you nothing about
- * what existed. A list you can read beats a box you have to guess at.
+ * These replaced a free-text box that needed you to know a line's exact name and
+ * spell it (`M10, U8`), and showed you nothing about what existed.
  *
- * Both still drive the same `filterVehicles(vehicles, filters, lineFilter)`, so
- * "All types" simply sets every product true and "All lines" leaves the line set
- * empty. No change to the filter logic or its tests.
+ * Built from <details> plus checkboxes rather than <select multiple>, which needs
+ * ctrl/cmd-click to pick more than one and is close to unusable on a touch
+ * screen. The summary shows the current choice, so the panel stays compact.
+ *
+ * Both still drive the same `filterVehicles(vehicles, filters, lineFilter)`: every
+ * type ticked sets all products true, and no line ticked leaves the line set
+ * empty, which already means "all". So the filter logic and its tests are
+ * unchanged.
  */
-const ALL = '*'
 
 /**
  * Every line the app knows about, with its type. Seeded from tracks.json so the
@@ -603,66 +606,122 @@ const ALL = '*'
  */
 const knownLines = new Map<string, Product>()
 
-const typeRow = document.createElement('div')
-typeRow.className = 'mode'
-const typeSelect = document.createElement('select')
-const lineRow = document.createElement('div')
-lineRow.className = 'mode'
-const lineSelect = document.createElement('select')
-
-const typeLabel = document.createElement('label')
-typeLabel.append('Type: ', typeSelect)
-typeRow.append(typeLabel)
-const lineLabel = document.createElement('label')
-lineLabel.append('Line: ', lineSelect)
-lineRow.append(lineLabel)
-filterEl.append(typeRow, lineRow)
-
-const opt = (value: string, text: string): HTMLOptionElement => {
-  const o = document.createElement('option')
-  o.value = value
-  o.textContent = text
-  return o
+/** A dropdown holding a checkbox list. Returns the parts the caller fills in. */
+function multiSelect(title: string) {
+  const box = document.createElement('details')
+  box.className = 'multi'
+  const head = document.createElement('summary')
+  const caption = document.createElement('span')
+  caption.className = 'multi-caption'
+  head.append(`${title}: `, caption)
+  const body = document.createElement('div')
+  body.className = 'multi-body'
+  box.append(head, body)
+  filterEl.append(box)
+  return {box, caption, body}
 }
+
+const typeUi = multiSelect('Type')
+const lineUi = multiSelect('Line')
 
 /** Types that actually have lines, in the order PRODUCT_LABELS declares them. */
-const presentTypes = (): Product[] =>
-  (Object.keys(PRODUCT_LABELS) as Product[]).filter(p => [...knownLines.values()].includes(p))
-
-function rebuildTypeOptions() {
-  const keep = typeSelect.value
-  typeSelect.replaceChildren(opt(ALL, 'All types'))
-  for (const p of presentTypes()) typeSelect.append(opt(p, PRODUCT_LABELS[p]))
-  typeSelect.value = [...typeSelect.options].some(o => o.value === keep) ? keep : ALL
+const presentTypes = (): Product[] => {
+  const have = new Set(knownLines.values())
+  return (Object.keys(PRODUCT_LABELS) as Product[]).filter(p => have.has(p))
 }
 
-function rebuildLineOptions() {
-  const keep = lineSelect.value
-  lineSelect.replaceChildren(opt(ALL, 'All lines'))
-  const chosen = typeSelect.value
-  const groups = chosen === ALL ? presentTypes() : [chosen as Product]
-  for (const p of groups) {
+/** One checkbox row. `onSet` receives the new checked state. */
+function checkRow(text: string, checked: boolean, onSet: (on: boolean) => void, colour?: string) {
+  const label = document.createElement('label')
+  label.className = 'layer'
+  const cb = document.createElement('input')
+  cb.type = 'checkbox'
+  cb.checked = checked
+  cb.onchange = () => onSet(cb.checked)
+  label.append(cb, ` ${text}`)
+  if (colour) {
+    const dot = document.createElement('span')
+    dot.style.color = colour
+    dot.textContent = ' ●'
+    label.append(dot)
+  }
+  return label
+}
+
+function describeTypes(): string {
+  const on = presentTypes().filter(p => filters[p])
+  if (on.length === 0) return 'none'
+  if (on.length === presentTypes().length) return 'all'
+  return on.map(p => PRODUCT_LABELS[p]).join(', ')
+}
+
+function describeLines(): string {
+  if (lineFilter.size === 0) return 'all'
+  const names = [...lineFilter].sort(compareLineNames)
+  return names.length <= 3 ? names.join(', ') : `${names.length} lines`
+}
+
+function rebuildTypes() {
+  const types = presentTypes()
+  const allOn = types.length > 0 && types.every(p => filters[p])
+  typeUi.body.replaceChildren(
+    checkRow('All types', allOn, on => {
+      for (const p of types) filters[p] = on
+      // a line whose type just went away must stop filtering, or the map empties
+      // with no visible reason why
+      dropHiddenLines()
+      rebuildTypes()
+      rebuildLines()
+      render()
+    })
+  )
+  for (const p of types) {
+    typeUi.body.append(checkRow(PRODUCT_LABELS[p], filters[p], on => {
+      filters[p] = on
+      dropHiddenLines()
+      rebuildTypes()
+      rebuildLines()
+      render()
+    }, PRODUCT_COLORS[p]))
+  }
+  typeUi.caption.textContent = describeTypes()
+}
+
+/** Forget any picked line whose type is no longer shown. */
+function dropHiddenLines() {
+  for (const name of [...lineFilter]) {
+    const p = knownLines.get(name)
+    if (p && !filters[p]) lineFilter.delete(name)
+  }
+}
+
+function rebuildLines() {
+  lineUi.body.replaceChildren(
+    checkRow('All lines', lineFilter.size === 0, on => {
+      if (on) lineFilter.clear()
+      rebuildLines()
+      render()
+    })
+  )
+  for (const p of presentTypes()) {
+    if (!filters[p]) continue // only offer lines you could actually see
     const names = [...knownLines].filter(([, prod]) => prod === p).map(([n]) => n).sort(compareLineNames)
     if (names.length === 0) continue
-    // group by type, so "All types" stays readable instead of one long list
-    const g = document.createElement('optgroup')
-    g.label = PRODUCT_LABELS[p]
-    for (const n of names) g.append(opt(n, n))
-    lineSelect.append(g)
+    const head = document.createElement('div')
+    head.className = 'multi-group'
+    head.textContent = PRODUCT_LABELS[p]
+    lineUi.body.append(head)
+    for (const n of names) {
+      lineUi.body.append(checkRow(n, lineFilter.has(n), on => {
+        if (on) lineFilter.add(n)
+        else lineFilter.delete(n)
+        rebuildLines()
+        render()
+      }))
+    }
   }
-  // keep the chosen line if it still belongs to the chosen type
-  lineSelect.value = [...lineSelect.querySelectorAll('option')].some(o => o.value === keep) ? keep : ALL
+  lineUi.caption.textContent = describeLines()
 }
-
-function applyFilters() {
-  const chosen = typeSelect.value
-  for (const p of Object.keys(filters) as Product[]) filters[p] = chosen === ALL || chosen === p
-  lineFilter = lineSelect.value === ALL ? new Set() : new Set([lineSelect.value])
-  render()
-}
-
-typeSelect.onchange = () => { rebuildLineOptions(); applyFilters() }
-lineSelect.onchange = applyFilters
 
 /** Add any lines we have not seen before; rebuild the menus only if that happens. */
 function learnLines(entries: Iterable<[string, Product]>) {
@@ -673,11 +732,11 @@ function learnLines(entries: Iterable<[string, Product]>) {
     added = true
   }
   if (!added) return
-  rebuildTypeOptions()
-  rebuildLineOptions()
+  rebuildTypes()
+  rebuildLines()
 }
-rebuildTypeOptions()
-rebuildLineOptions()
+rebuildTypes()
+rebuildLines()
 
 /** A checkbox that shows or hides one map layer, appended to `parent`. */
 const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLElement) => {
