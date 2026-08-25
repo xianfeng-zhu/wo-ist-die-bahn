@@ -114,11 +114,30 @@ export function stepTowards(from: [number, number], to: [number, number], dtMs: 
  * were moving, and all 8 vehicles caught mid-freeze were correcting, with gaps
  * between drawn and computed position of up to 5,697 m.
  *
- * 2 s reads as a pause rather than a fault. After yielding, the badge glides to
- * the corrected position under the usual rate limit, so a large correction is
- * still never a blink.
+ * 2 s reads as a pause rather than a fault. Raising it to 6 s was measured and
+ * was WORSE: it let a bigger gap build up first, so reversals went from 25 to 53
+ * per 100 s. The duration is not the lever — the yield rate is.
  */
 export const MAX_HOLD_MS = 2000
+
+/**
+ * Floor on how fast the badge may move BACKWARDS once a hold yields (m/s).
+ *
+ * Yielding at the normal correction rate produced 13 m single-frame reversals,
+ * 53 per 100 s — a visible jerk. 3 m/s is far below the ~10 m/s of the traffic
+ * around it, so an ordinary backwards correction reads as the badge settling
+ * into place. Drift p90 is ~35 m, so the common case closes in about 12 s.
+ */
+export const REVERSE_MAX_SPEED = 3
+
+/**
+ * Time constant for a backwards correction, so a gross error is not left in
+ * place for minutes. A flat 3 m/s would take half an hour to undo a 6 km gap —
+ * and gaps that size did occur before the hold was time-boxed. Proportional
+ * closing keeps small errors gentle and large ones prompt; `CATCHUP_MAX_STEP`
+ * still bounds any single frame.
+ */
+export const REVERSE_TAU_SEC = 10
 
 /**
  * Move `from` toward `to`, but not against `heading` — unless the hold has
@@ -144,8 +163,18 @@ export function forwardStep(
   if (!heading) return {pos: next, held: false}
   const move: [number, number] = [next[0] - from[0], next[1] - from[1]]
   const backwards = heading[0] * move[0] + heading[1] * move[1] < 0
-  if (!backwards || heldMs >= MAX_HOLD_MS) return {pos: next, held: false}
-  return {pos: from, held: true}
+  if (!backwards) return {pos: next, held: false}
+  if (heldMs < MAX_HOLD_MS) return {pos: from, held: true}
+  // Held long enough that holding is now the worse fault. Give way, but at
+  // REVERSE_MAX_SPEED: the drawn position IS wrong and has to be corrected, and
+  // a slow settle backwards reads far better than a jerk.
+  const gap = metresBetween(from, to)
+  const dtSec = Math.max(0, dtMs) / 1000
+  const speed = Math.max(REVERSE_MAX_SPEED, gap / REVERSE_TAU_SEC)
+  const budget = Math.min(speed * dtSec, CATCHUP_MAX_STEP)
+  if (gap === 0 || gap <= budget) return {pos: to, held: false}
+  const f = budget / gap
+  return {pos: [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f], held: false}
 }
 
 /** Distance in metres along a path of lat/lon points. */

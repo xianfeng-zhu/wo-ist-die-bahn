@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, MAX_HOLD_MS, impliedSpeed, maxResidualM, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, MAX_HOLD_MS, REVERSE_MAX_SPEED, REVERSE_TAU_SEC, impliedSpeed, maxResidualM, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -154,20 +154,55 @@ describe('forwardStep', () => {
     expect(heldMs).toBeLessThanOrEqual(MAX_HOLD_MS)
   })
 
-  it('reaches a target far behind it rather than staying stuck', () => {
-    // the 5,697 m case: it must converge, not deadlock
+  it('yields SLOWLY, so a correction backwards is a settle and not a jerk', () => {
+    // yielding at the full correction rate produced 13 m single-frame reversals,
+    // measured at 53 per 100 s. A backwards step must stay well under the speed
+    // of traffic around it.
+    const r = forwardStep(north(100), north(0), [1, 0], 16, MAX_HOLD_MS)
+    const moved = metresBetween(north(100), r.pos)
+    expect(moved).toBeGreaterThan(0)
+    // proportional: a 100 m gap closes at 10 m/s, still 80x under the forward cap
+    expect(moved).toBeLessThanOrEqual((100 / REVERSE_TAU_SEC) * 0.016 + 1e-9)
+    const fwd = metresBetween(north(0), forwardStep(north(0), north(4000), [1, 0], 16, 0).pos)
+    expect(moved).toBeLessThan(fwd / 20)
+  })
+
+  it('lands exactly on a nearby target when yielding', () => {
+    const near = north(99.99)
+    expect(forwardStep(north(100), near, [1, 0], 1000, MAX_HOLD_MS).pos).toEqual(near)
+  })
+
+  it('reverses far more slowly than it advances', () => {
+    const fwd = metresBetween(north(0), forwardStep(north(0), north(500), [1, 0], 100, 0).pos)
+    const back = metresBetween(north(100), forwardStep(north(100), north(0), [1, 0], 100, MAX_HOLD_MS).pos)
+    expect(back).toBeLessThan(fwd / 10)
+  })
+
+  it('corrects even a gross error rather than leaving it in place for minutes', () => {
+    // 6 km was a real gap before the hold was time-boxed. A flat reverse speed
+    // would take half an hour; proportional closing must do it in seconds.
     let pos = north(6000)
     let heldMs = 0
     let heading: [number, number] | null = [1, 0]
-    for (let i = 0; i < 4000 && metresBetween(pos, north(0)) > 5; i++) {
+    let ms = 0
+    while (ms < 60000 && metresBetween(pos, north(0)) > 5) {
       const r = forwardStep(pos, north(0), heading, 16, heldMs)
       heldMs = r.held ? heldMs + 16 : 0
       if (!r.held && metresBetween(pos, r.pos) >= 0.3) {
         heading = [r.pos[0] - pos[0], r.pos[1] - pos[1]]
       }
       pos = r.pos
+      ms += 16
     }
     expect(metresBetween(pos, north(0))).toBeLessThanOrEqual(5)
+    expect(ms).toBeLessThan(60000)
+  })
+
+  it('keeps an ordinary-sized correction gentle', () => {
+    // drift p90 is ~35 m: this is the common case and must stay near the floor
+    const moved = metresBetween(north(35), forwardStep(north(35), north(0), [1, 0], 16, MAX_HOLD_MS).pos)
+    expect(moved).toBeLessThanOrEqual((REVERSE_MAX_SPEED + 35 / REVERSE_TAU_SEC) * 0.016)
+    expect(moved).toBeLessThan(0.3) // under the recorder's noise floor, so it reads as a settle
   })
 })
 
