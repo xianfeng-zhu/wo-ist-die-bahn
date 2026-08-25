@@ -211,11 +211,12 @@ function updateSegment(v: Vehicle, m: Marker) {
     return
   }
   const start = {lat: f.pts[0][0], lon: f.pts[0][1]}
-  let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon})
-  // Does that GTFS track actually pass through the forecast? prepare-data.mjs
-  // keeps one shape per line (the longest), so branch variants (S1, M5, tram 12)
-  // do not match and projection would snap kilometres away. When it doesn't fit,
-  // follow the operator's own forecast points instead of a wrong track.
+  let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon}, f.pts)
+  // Does the chosen GTFS track actually pass through the forecast? pickShape
+  // takes the best of the line's variants, but a line can still be missing the
+  // exact variant this vehicle is on (prepare-data.mjs caps how many it ships).
+  // When nothing fits, follow the operator's own forecast points instead of a
+  // wrong track.
   const badFit = () => maxResidualM(path, f.pts) > SHAPE_FIT_LIMIT_M
   const tooFast = () => {
     const a = alongsOnPath(path, f.pts)
@@ -426,9 +427,10 @@ async function loadNetworkLayers() {
     for (const f of routes.features ?? []) {
       const line = f.properties?.line
       const coords = f.geometry?.coordinates
-      if (line && Array.isArray(coords)) {
-        // GeoJSON [lon, lat] -> [lat, lon]
-        lineShapes[line] = coords.map((c: [number, number]) => [c[1], c[0]])
+      if (line && Array.isArray(coords) && coords.length >= 2) {
+        // Several features share a line name — one per route variant — so collect
+        // them all. GeoJSON [lon, lat] -> [lat, lon].
+        ;(lineShapes[line] ??= []).push(coords.map((c: [number, number]) => [c[1], c[0]]))
       }
     }
     // TESTING: routes layer disabled — only targets render
