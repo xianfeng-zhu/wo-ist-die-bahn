@@ -19,6 +19,7 @@ import {createInterface} from 'node:readline'
 import {execSync} from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
+import {simplifyPath} from './simplify.mjs'
 
 const TMP = mkdtempSync(path.join(os.tmpdir(), 'vbb-'))
 const run = c => execSync(c, {stdio: 'inherit', cwd: TMP})
@@ -159,6 +160,36 @@ try {
       const cur = lineBest.get(shortName)
       if (!cur || pts.length > cur.pts.length) lineBest.set(shortName, {product, pts})
     }
+  }
+
+  // ---- inventory report: how many distinct variants per line, and at what cost? ----
+  // Writes nothing. Payload size is the deciding constraint for shipping every
+  // variant, so measure it before changing any output.
+  {
+    const perLine = new Map() // shortName -> Set(shapeId)
+    for (const [routeId, {shortName}] of railRoutes) {
+      for (const t of routeTrips.get(routeId) ?? []) {
+        if (!t.shapeId || !shapePts.has(t.shapeId)) continue
+        if (!perLine.has(shortName)) perLine.set(shortName, new Set())
+        perLine.get(shortName).add(t.shapeId)
+      }
+    }
+    const counts = [...perLine].map(([l, s]) => [l, s.size]).sort((a, b) => b[1] - a[1])
+    const totalShapes = counts.reduce((n, [, c]) => n + c, 0)
+    let rawPts = 0
+    let simpPts = 0
+    for (const s of perLine.values()) {
+      for (const id of s) {
+        const pts = shapePts.get(id)
+        rawPts += pts.length
+        simpPts += simplifyPath(pts, 10).length
+      }
+    }
+    console.log(`\n--- shape inventory`)
+    console.log(`  distinct shapes across rail lines: ${totalShapes} (vs ${lineBest.size} shipped today)`)
+    console.log(`  points: ${rawPts.toLocaleString('en-US')} raw -> ${simpPts.toLocaleString('en-US')} simplified at 10 m`)
+    console.log(`  most variants: ${counts.slice(0, 8).map(([l, c]) => `${l}:${c}`).join('  ')}`)
+    console.log(`  median variants per line: ${counts[Math.floor(counts.length / 2)]?.[1]}\n`)
   }
 
   const decimate = (pts, max) => {
