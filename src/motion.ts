@@ -42,6 +42,8 @@ export interface AnimState {
   correcting?: boolean
   /** Last direction the badge actually moved, so it can never be dragged back. */
   heading?: [number, number]
+  /** How long `forwardStep` has been blocking movement (see MAX_HOLD_MS). */
+  heldMs?: number
 }
 
 /**
@@ -102,24 +104,48 @@ export function stepTowards(from: [number, number], to: [number, number], dtMs: 
 }
 
 /**
- * Move `from` toward `to`, but never against `heading`.
+ * Longest a forward-only hold may block movement.
+ *
+ * Without a limit the hold is a deadlock: a held badge does not move, so the
+ * caller never refreshes its `heading` (it only updates on a move of >= 0.3 m),
+ * so the hold can never end. The only escape was the target coming round to the
+ * front again — on a ring line, a whole lap. Measured before this limit existed:
+ * 33.5% of vehicle-samples were still while the operator's forecast said they
+ * were moving, and all 8 vehicles caught mid-freeze were correcting, with gaps
+ * between drawn and computed position of up to 5,697 m.
+ *
+ * 2 s reads as a pause rather than a fault. After yielding, the badge glides to
+ * the corrected position under the usual rate limit, so a large correction is
+ * still never a blink.
+ */
+export const MAX_HOLD_MS = 2000
+
+/**
+ * Move `from` toward `to`, but not against `heading` — unless the hold has
+ * already lasted `MAX_HOLD_MS`, in which case yield rather than deadlock.
  *
  * `stepTowards` has no sense of direction: when a poll corrects a badge to a
  * position BEHIND it, easing there drags it backwards. `drawnAlong` keeps
  * progress monotonic along one path, but a path swap re-projects the position,
- * so the guarantee has to be repeated here in position space. Holding until the
- * correction moves ahead reads as a pause; reversing reads as a bug.
+ * so the guarantee has to be repeated here in position space. Holding briefly
+ * reads as a pause, reversing reads as a bug, and holding forever is worse than
+ * either.
+ *
+ * Returns `held` so the caller can accumulate `AnimState.heldMs`.
  */
 export function forwardStep(
   from: [number, number],
   to: [number, number],
   heading: [number, number] | null,
-  dtMs: number
-): [number, number] {
+  dtMs: number,
+  heldMs = 0
+): {pos: [number, number]; held: boolean} {
   const next = stepTowards(from, to, dtMs)
-  if (!heading) return next
+  if (!heading) return {pos: next, held: false}
   const move: [number, number] = [next[0] - from[0], next[1] - from[1]]
-  return heading[0] * move[0] + heading[1] * move[1] < 0 ? from : next
+  const backwards = heading[0] * move[0] + heading[1] * move[1] < 0
+  if (!backwards || heldMs >= MAX_HOLD_MS) return {pos: next, held: false}
+  return {pos: from, held: true}
 }
 
 /** Distance in metres along a path of lat/lon points. */

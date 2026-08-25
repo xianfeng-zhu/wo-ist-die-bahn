@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, impliedSpeed, maxResidualM, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
+import {advanceAlong, alongAt, berlinEpoch, CATCHUP_MAX_SPEED, CATCHUP_MAX_STEP, CATCHUP_TAU_MS, COAST_GRACE_MS, forwardStep, MAX_HOLD_MS, impliedSpeed, maxResidualM, metresBetween, pathMetres, SPEED_SANITY_MPS, stepTowards, pointAlongPath, projectOntoPath, slicePath} from './motion.js'
 
 describe('pointAlongPath', () => {
   const path: Array<[number, number]> = [[0, 0], [0, 10], [0, 20]]
@@ -105,23 +105,69 @@ describe('forwardStep', () => {
   const north = (m: number): [number, number] => [52.52 + m / 111320, 13.405]
 
   it('moves forward when the target is ahead', () => {
-    const next = forwardStep(p0, north(0.4), [1, 0], 16)
-    expect(next[0]).toBeGreaterThan(p0[0])
+    const r = forwardStep(p0, north(0.4), [1, 0], 16, 0)
+    expect(r.pos[0]).toBeGreaterThan(p0[0])
+    expect(r.held).toBe(false)
   })
 
   it('holds instead of reversing when the target is behind', () => {
-    // a poll corrected this badge backwards; it must not be dragged back
-    expect(forwardStep(north(10), north(4), [1, 0], 16)).toEqual(north(10))
+    const r = forwardStep(north(10), north(4), [1, 0], 16, 0)
+    expect(r.pos).toEqual(north(10))
+    expect(r.held).toBe(true)
   })
 
   it('moves freely when no heading is known yet', () => {
-    const next = forwardStep(north(10), north(4), null, 16)
-    expect(next[0]).toBeLessThan(north(10)[0])
+    const r = forwardStep(north(10), north(4), null, 16, 0)
+    expect(r.pos[0]).toBeLessThan(north(10)[0])
+    expect(r.held).toBe(false)
   })
 
   it('still rate-limits a forward correction', () => {
-    const far = north(4000)
-    expect(metresBetween(north(0), forwardStep(north(0), far, [1, 0], 16))).toBeLessThanOrEqual(CATCHUP_MAX_STEP + 1e-6)
+    const r = forwardStep(north(0), north(4000), [1, 0], 16, 0)
+    expect(metresBetween(north(0), r.pos)).toBeLessThanOrEqual(CATCHUP_MAX_STEP + 1e-6)
+  })
+
+  // The deadlock: a held badge does not move, so main.ts never refreshes its
+  // heading, so the hold can never end. Measured on live data: 8 of 8 vehicles
+  // caught mid-freeze were correcting, with gaps up to 5,697 m.
+  it('yields once it has been held for MAX_HOLD_MS', () => {
+    const r = forwardStep(north(10), north(4), [1, 0], 16, MAX_HOLD_MS)
+    expect(r.pos[0]).toBeLessThan(north(10)[0])
+    expect(r.held).toBe(false)
+  })
+
+  it('keeps holding while under the limit', () => {
+    expect(forwardStep(north(10), north(4), [1, 0], 16, MAX_HOLD_MS - 1).held).toBe(true)
+  })
+
+  it('cannot be held indefinitely by a target that stays behind it', () => {
+    let pos = north(10)
+    let heldMs = 0
+    const heading: [number, number] = [1, 0]
+    for (let i = 0; i < 1000; i++) {
+      const r = forwardStep(pos, north(4), heading, 16, heldMs)
+      heldMs = r.held ? heldMs + 16 : 0
+      pos = r.pos
+      if (!r.held) break
+    }
+    expect(pos[0]).toBeLessThan(north(10)[0])
+    expect(heldMs).toBeLessThanOrEqual(MAX_HOLD_MS)
+  })
+
+  it('reaches a target far behind it rather than staying stuck', () => {
+    // the 5,697 m case: it must converge, not deadlock
+    let pos = north(6000)
+    let heldMs = 0
+    let heading: [number, number] | null = [1, 0]
+    for (let i = 0; i < 4000 && metresBetween(pos, north(0)) > 5; i++) {
+      const r = forwardStep(pos, north(0), heading, 16, heldMs)
+      heldMs = r.held ? heldMs + 16 : 0
+      if (!r.held && metresBetween(pos, r.pos) >= 0.3) {
+        heading = [r.pos[0] - pos[0], r.pos[1] - pos[1]]
+      }
+      pos = r.pos
+    }
+    expect(metresBetween(pos, north(0))).toBeLessThanOrEqual(5)
   })
 })
 

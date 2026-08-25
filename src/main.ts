@@ -250,6 +250,7 @@ function updateSegment(v: Vehicle, m: Marker) {
     drawnT: Date.now(),
     renderPos: prev?.renderPos, // keep what is on screen; frame() glides to the fix
     heading: prev?.heading,     // and keep its direction, so it is never dragged back
+    heldMs: prev?.heldMs,       // and how long it has been stalled, so a hold cannot restart forever
     reportT: Date.now(),
     ms: f.ms,
     alongs,
@@ -303,7 +304,15 @@ function frame(rafNow: number) {
       s.drawnT = now
       const target = pointAlongPath(s.path, s.total > 0 ? along / s.total : 0)
       const from = s.renderPos
-      s.renderPos = from ? forwardStep(from, target, s.heading ?? null, dtMs) : target
+      if (from) {
+        const step = forwardStep(from, target, s.heading ?? null, dtMs, s.heldMs ?? 0)
+        s.renderPos = step.pos
+        // reset on any move, so the allowance is per stall rather than cumulative
+        s.heldMs = step.held ? (s.heldMs ?? 0) + dtMs : 0
+      } else {
+        s.renderPos = target
+        s.heldMs = 0
+      }
       if (from && metresBetween(from, s.renderPos) >= 0.3) {
         s.heading = [s.renderPos[0] - from[0], s.renderPos[1] - from[1]]
       }
