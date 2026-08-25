@@ -2,7 +2,7 @@ import {Map as GLMap, Marker, Popup, setWorkerUrl, type FilterSpecification, typ
 import 'maplibre-gl/dist/maplibre-gl.css'
 import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
-import {filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
+import {compareLineNames, filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
@@ -449,6 +449,7 @@ async function loadNetworkLayers() {
   // compound their opacity into a solid smear.
   try {
     const tracks = await (await fetch('/tracks.json')).json()
+    const learned: Array<[string, Product]> = []
     for (const f of tracks.features ?? []) {
       const line = f.properties?.line
       const product = f.properties?.product as Product | undefined
@@ -456,7 +457,10 @@ async function loadNetworkLayers() {
         ...f.properties,
         color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'
       }
+      if (line && product) learned.push([line, product])
     }
+    // the menus list every line in the network, not just the ones running now
+    learnLines(learned)
     map.addSource('routes', {type: 'geojson', data: tracks})
     map.addLayer({
       id: 'routes-layer',
@@ -518,6 +522,9 @@ async function poll() {
     failures = 0
     nextDelay = POLL_INTERVAL_MS
     conn = 'live'
+    // top up the menus: a line running now but absent from tracks.json (a new
+    // service, or ?all=1 widening the product mask) must still be selectable
+    learnLines(vehicles.map(v => [v.line, v.product] as [string, Product]))
     if (recorder) {
       const drawn = new Map<string, [number, number]>()
       for (const [id, s] of animStates) if (s.renderPos) drawn.set(id, s.renderPos)
@@ -576,41 +583,101 @@ applyCompact()
 setSettingsOpen(false)
 // tapping the map dismisses the panel, like any other overlay
 map.on('click', () => { if (document.body.classList.contains('settings-open')) setSettingsOpen(false) })
-const modeRow = document.createElement('div')
-modeRow.className = 'mode'
-;(Object.keys(PRODUCT_LABELS) as Product[]).forEach(p => {
-  const label = document.createElement('label')
-  const cb = document.createElement('input')
-  cb.type = 'checkbox'
-  cb.checked = true
-  cb.onchange = () => {
-    filters[p] = cb.checked
-    render()
-  }
-  const dot = document.createElement('span')
-  dot.style.color = PRODUCT_COLORS[p]
-  dot.textContent = '●'
-  label.append(cb, ` ${PRODUCT_LABELS[p]} `, dot)
-  modeRow.append(label)
-})
-filterEl.append(modeRow)
-// Line-name filter: comma/space-separated, empty = all lines
-const parseLines = (s: string): Set<string> =>
-  new Set(s.split(/[,;\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean))
-const lineInput = document.createElement('input')
-lineInput.type = 'text'
-lineInput.value = ''
-lineInput.placeholder = 'lines, e.g. M10, U8 (empty = all)'
-lineInput.oninput = () => {
-  lineFilter = parseLines(lineInput.value)
-  render()
-}
+/*
+ * Two dropdowns: pick a type, then a line within it.
+ *
+ * This replaced three checkboxes plus a free-text box. The text box needed you to
+ * know a line's exact name and spell it (`M10, U8`), and told you nothing about
+ * what existed. A list you can read beats a box you have to guess at.
+ *
+ * Both still drive the same `filterVehicles(vehicles, filters, lineFilter)`, so
+ * "All types" simply sets every product true and "All lines" leaves the line set
+ * empty. No change to the filter logic or its tests.
+ */
+const ALL = '*'
+
+/**
+ * Every line the app knows about, with its type. Seeded from tracks.json so the
+ * list is complete and stable rather than only what happens to be running, then
+ * topped up from live data so a line can never be missing from the menu.
+ */
+const knownLines = new Map<string, Product>()
+
+const typeRow = document.createElement('div')
+typeRow.className = 'mode'
+const typeSelect = document.createElement('select')
 const lineRow = document.createElement('div')
 lineRow.className = 'mode'
+const lineSelect = document.createElement('select')
+
+const typeLabel = document.createElement('label')
+typeLabel.append('Type: ', typeSelect)
+typeRow.append(typeLabel)
 const lineLabel = document.createElement('label')
-lineLabel.append('Lines:')
-lineRow.append(lineLabel, lineInput)
-filterEl.append(lineRow)
+lineLabel.append('Line: ', lineSelect)
+lineRow.append(lineLabel)
+filterEl.append(typeRow, lineRow)
+
+const opt = (value: string, text: string): HTMLOptionElement => {
+  const o = document.createElement('option')
+  o.value = value
+  o.textContent = text
+  return o
+}
+
+/** Types that actually have lines, in the order PRODUCT_LABELS declares them. */
+const presentTypes = (): Product[] =>
+  (Object.keys(PRODUCT_LABELS) as Product[]).filter(p => [...knownLines.values()].includes(p))
+
+function rebuildTypeOptions() {
+  const keep = typeSelect.value
+  typeSelect.replaceChildren(opt(ALL, 'All types'))
+  for (const p of presentTypes()) typeSelect.append(opt(p, PRODUCT_LABELS[p]))
+  typeSelect.value = [...typeSelect.options].some(o => o.value === keep) ? keep : ALL
+}
+
+function rebuildLineOptions() {
+  const keep = lineSelect.value
+  lineSelect.replaceChildren(opt(ALL, 'All lines'))
+  const chosen = typeSelect.value
+  const groups = chosen === ALL ? presentTypes() : [chosen as Product]
+  for (const p of groups) {
+    const names = [...knownLines].filter(([, prod]) => prod === p).map(([n]) => n).sort(compareLineNames)
+    if (names.length === 0) continue
+    // group by type, so "All types" stays readable instead of one long list
+    const g = document.createElement('optgroup')
+    g.label = PRODUCT_LABELS[p]
+    for (const n of names) g.append(opt(n, n))
+    lineSelect.append(g)
+  }
+  // keep the chosen line if it still belongs to the chosen type
+  lineSelect.value = [...lineSelect.querySelectorAll('option')].some(o => o.value === keep) ? keep : ALL
+}
+
+function applyFilters() {
+  const chosen = typeSelect.value
+  for (const p of Object.keys(filters) as Product[]) filters[p] = chosen === ALL || chosen === p
+  lineFilter = lineSelect.value === ALL ? new Set() : new Set([lineSelect.value])
+  render()
+}
+
+typeSelect.onchange = () => { rebuildLineOptions(); applyFilters() }
+lineSelect.onchange = applyFilters
+
+/** Add any lines we have not seen before; rebuild the menus only if that happens. */
+function learnLines(entries: Iterable<[string, Product]>) {
+  let added = false
+  for (const [name, product] of entries) {
+    if (!name || knownLines.has(name)) continue
+    knownLines.set(name, product)
+    added = true
+  }
+  if (!added) return
+  rebuildTypeOptions()
+  rebuildLineOptions()
+}
+rebuildTypeOptions()
+rebuildLineOptions()
 
 /** A checkbox that shows or hides one map layer, appended to `parent`. */
 const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLElement) => {

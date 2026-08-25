@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import type {Product} from './vehicle.js'
-import {delayFrom, filterVehicles, productFromCls, shortId, transformJourney} from './vehicle.js'
+import {compareLineNames, delayFrom, filterVehicles, productFromCls, shortId, transformJourney} from './vehicle.js'
 
 describe('productFromCls', () => {
   it('maps HAFAS cls bitmask to rail products', () => {
@@ -219,5 +219,28 @@ describe('test mode (strictName: false)', () => {
   it('still drops vehicles without a position in test mode', () => {
     const j = {jid: 'f1', prodX: 0, dirTxt: 'd', pos: null, stopL: []}
     expect(transformJourney(j as never, {locs: [], prods: [{name: 'FEX', cls: 64}]}, '23:00:00', false)).toBeNull()
+  })
+})
+
+describe('compareLineNames', () => {
+  const sorted = (names: string[]) => [...names].sort(compareLineNames)
+
+  it('orders numbers numerically, not as text', () => {
+    expect(sorted(['U12', 'U1', 'U9', 'U2'])).toEqual(['U1', 'U2', 'U9', 'U12'])
+    expect(sorted(['S41', 'S1', 'S25', 'S3'])).toEqual(['S1', 'S3', 'S25', 'S41'])
+  })
+
+  it('puts bare tram numbers before the M lines', () => {
+    expect(sorted(['M10', '21', 'M1', '12'])).toEqual(['12', '21', 'M1', 'M10'])
+  })
+
+  it('groups by prefix', () => {
+    expect(sorted(['U8', 'S1', 'M4', '50'])).toEqual(['50', 'M4', 'S1', 'U8'])
+  })
+
+  it('is stable for equal names and handles odd input', () => {
+    expect(compareLineNames('U8', 'U8')).toBe(0)
+    expect(sorted(['', 'U1'])).toEqual(['', 'U1'])
+    expect(() => sorted(['FEX', 'RE1', 'X9'])).not.toThrow()
   })
 })

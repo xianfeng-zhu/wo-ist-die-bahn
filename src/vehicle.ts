@@ -68,6 +68,21 @@ const LINE_PATTERNS: Record<Product, RegExp> = {
   tram: /^M?\d{1,2}$/
 }
 
+/**
+ * Sort line names the way a person reads them: the number part in numeric order,
+ * so U9 comes before U12 rather than after U1. Bare tram numbers (12, 21) sort
+ * before the M-prefixed ones, which is the order the network itself uses.
+ */
+export function compareLineNames(a: string, b: string): number {
+  const split = (s: string): [string, number] => {
+    const m = /^(\D*)(\d*)/.exec(s)
+    return [m?.[1] ?? '', m?.[2] ? Number(m[2]) : -1]
+  }
+  const [pa, na] = split(a)
+  const [pb, nb] = split(b)
+  return pa === pb ? na - nb : pa.localeCompare(pb)
+}
+
 export type Filters = Record<Product, boolean>
 
 /** Product + optional line-name filter (empty/omitted lines = all). */
