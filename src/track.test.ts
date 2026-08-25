@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import {buildSegmentPath, pickShape} from './track.js'
+import {maxResidualM} from './motion.js'
 
 // a straight north-south shape, 0..30
 const shape: Array<[number, number]> = [[0, 0], [10, 0], [20, 0], [30, 0]]
@@ -135,5 +136,19 @@ describe('pickShape fit precedence', () => {
   it('ignores a variant that is nowhere near the forecast', () => {
     const off: Array<[number, number]> = long.map(([la, lo]) => [la, lo + m(2000)]) as Array<[number, number]>
     expect(pickShape([off, short], [[52.50 + m(300), 13.40]])).toBe(short)
+  })
+})
+
+describe('pickShape early exit', () => {
+  it('picks the same variant as a full scan would', () => {
+    const cands = [trunk, branch]
+    for (const pts of [
+      [[52.50 + m(650), 13.4075]] as Array<[number, number]>,
+      [[52.50 + m(1500), 13.40]] as Array<[number, number]>,
+      [[52.50 + m(100), 13.40], [52.50 + m(1800), 13.40]] as Array<[number, number]>
+    ]) {
+      const full = cands.reduce((b, s) => (maxResidualM(s, pts) < maxResidualM(b, pts) ? s : b), cands[0])
+      expect(pickShape(cands, pts)).toBe(full)
+    }
   })
 })

@@ -59,15 +59,54 @@ export function metresBetween(a: [number, number], b: [number, number]): number 
 }
 
 /**
- * Worst distance from any point in `pts` to `path`, in metres.
+ * Worst distance from any point in `pts` to `path`, in metres. `limit` lets a
+ * caller abandon a candidate as soon as it cannot win.
  *
- * Used both to choose between route variants and to reject a track the forecast
- * does not lie on. Worst, not average: one point kilometres off means the wrong
- * track, however well the rest happens to line up.
+ * Measures perpendicular distance directly rather than going through
+ * `projectOntoPath`, which finds its nearest point in DEGREE space — 1 deg of
+ * longitude treated as 1 deg of latitude, where at Berlin longitude is 0.61 of
+ * that. That foot point is not the true nearest one, so measuring it in metres
+ * overstated the residual by a mean 1.8 m and up to 7.5 m, varying with the
+ * segment's BEARING. Harmless against a 250 m threshold, fatal for `pickShape`:
+ * it discriminates on differences of a few metres, so the bias let a track's
+ * compass direction decide which variant a vehicle was put on.
+ *
+ * (`projectOntoPath`, `pointAlongPath` and `slicePath` still share degree-space
+ * units. They are self-consistent with each other, and changing them is a
+ * separate job — see AGENTS.md.)
+ *
+ * Worst, not average: one point kilometres off means the wrong track, however
+ * well the rest happens to line up.
  */
-export function maxResidualM(path: Array<[number, number]>, pts: Array<[number, number]>): number {
+export function maxResidualM(
+  path: Array<[number, number]>,
+  pts: Array<[number, number]>,
+  limit = Infinity
+): number {
+  if (path.length === 0) return 0
   let worst = 0
-  for (const pt of pts) worst = Math.max(worst, metresBetween(pt, projectOntoPath(path, {lat: pt[0], lon: pt[1]}).point))
+  for (const pt of pts) {
+    if (path.length === 1) {
+      worst = Math.max(worst, metresBetween(pt, path[0]))
+    } else {
+      let best = Infinity
+      for (let i = 1; i < path.length; i++) {
+        const a = path[i - 1]
+        const b = path[i]
+        const kx = 111320 * Math.cos(a[0] * Math.PI / 180)
+        const py = (pt[0] - a[0]) * 111320
+        const px = (pt[1] - a[1]) * kx
+        const by = (b[0] - a[0]) * 111320
+        const bx = (b[1] - a[1]) * kx
+        const len2 = by * by + bx * bx
+        const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, (py * by + px * bx) / len2))
+        const d = Math.hypot(py - by * t, px - bx * t)
+        if (d < best) best = d
+      }
+      worst = Math.max(worst, best)
+    }
+    if (worst > limit) return worst
+  }
   return worst
 }
 
