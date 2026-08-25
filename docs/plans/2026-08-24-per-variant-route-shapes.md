@@ -35,6 +35,53 @@ Three options were measured before writing this plan.
 - The commented-out `routes-layer` / `stations-layer` (`// TESTING:` at `src/main.ts:395`, `:428`, `:568`). Leave as the user set them.
 - Any change to poll interval, request shape, or `src/hci.ts`.
 
+---
+
+## RESULTS (executed 2026-08-25)
+
+Three clean recorder arms, same evening, ~330-360 vehicles each, nothing else
+running in the page. The middle column is what shipped.
+
+| | baseline (48 shapes) | **variants (533)** | variants + longest tie-break |
+|---|---|---|---|
+| `badFit` share of rebuilds | 7.9% (386/4889) | **0.25% (11/4405)** | 0.8% (25/4644) |
+| `tooFast` | 11 | **5** | 6 |
+| residual p50 / p90 | 10 / 86 m | **4 / 19 m** | — |
+| drift median | 7 m | **5 m** | 6 m |
+| drift p90 | 70 m | **61 m** | 106 m |
+| drift max | 2240 m | **2088 m** | 2912 m |
+| dwell p90 | 22.1 s | **11.6 s** | 43 s |
+| dwell max | 64 s | **53.8 s** | 75.9 s |
+| freezes per 100 s | **8.6** | 13.8 | 11.8 |
+| reversals | 0 | **0** | 0 |
+| overspeed | 1 | **0** | 8 |
+| max step | 14 m | 25 m | 24.8 m |
+| `routes.json` | 76 KB gz | **54 KB gz** | 54 KB gz |
+| `pickShape` cost | n/a | **35 ms/poll** | — |
+
+Shape inventory: 2,179 distinct `shape_id`s -> 1,801 corridors -> 533 shipped at
+cap 12. 708k raw points -> 117k at 10 m tolerance.
+
+**Wins:** every accuracy metric. `badFit` fell 32x. Payload shrank while
+carrying 11x more shapes.
+
+**Regression:** freezes rose 8.6 -> 13.8 per 100 s, and max step went from 14 m
+to the 25 m cap. Both trace to the same cause — `pickShape` is unstable, so the
+path swaps between overlapping variants under a running animation. Typical
+dwell *halved* (22 -> 12 s) at the same time, which fits the reading that
+vehicles now reach their declared stop sooner and then have nowhere to go.
+
+**Rejected during execution:** breaking ties by track length. It halved the
+flapping (67 -> 29 vehicles) but measured worse on drift, dwell and overspeed,
+because it prefers full-line and full-ring variants and projection onto a long
+or closed shape is itself ambiguous. Reverted; limitation documented instead.
+
+**Deviation from plan:** Task 3's `variantKey` included `pts.length`, which
+defeats its own purpose (near-duplicates with different point counts would not
+collapse). Replaced with a 12-point corridor fingerprint at ~100 m resolution.
+
+---
+
 ### Definition of done
 
 Measured with a 100 s recording of the full vehicle set, compared against the current build:
