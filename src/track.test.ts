@@ -113,3 +113,27 @@ describe('buildSegmentPath with variants', () => {
     expect(path.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+// Ties are NOT broken here. Breaking them by track length was tried and
+// measured worse on drift, dwell and overspeed (see pickShape's note), so the
+// instability is documented rather than papered over. What must hold is that a
+// clearly better fit always wins.
+describe('pickShape fit precedence', () => {
+  const short: Array<[number, number]> = [[52.50, 13.40], [52.50 + m(600), 13.40]]
+  const long: Array<[number, number]> = [[52.50, 13.40], [52.50 + m(600), 13.40], [52.50 + m(3000), 13.40]]
+
+  it('prefers a better fit over a longer variant', () => {
+    const onBranch: Array<[number, number]> = [[52.50 + m(650), 13.4075]]
+    expect(pickShape([long, branch], onBranch)).toBe(branch)
+  })
+
+  it('prefers a better fit over a shorter variant', () => {
+    const farNorth: Array<[number, number]> = [[52.50 + m(2500), 13.40]]
+    expect(pickShape([short, long], farNorth)).toBe(long)
+  })
+
+  it('ignores a variant that is nowhere near the forecast', () => {
+    const off: Array<[number, number]> = long.map(([la, lo]) => [la, lo + m(2000)]) as Array<[number, number]>
+    expect(pickShape([off, short], [[52.50 + m(300), 13.40]])).toBe(short)
+  })
+})
