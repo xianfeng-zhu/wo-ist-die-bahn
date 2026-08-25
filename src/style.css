@@ -52,6 +52,15 @@ body.compact.settings-open #filters {
 #statusbar[data-state='offline'] { color: #b3261e; }
 
 /* error log — debug view only; hidden until something is actually logged */
+/*
+ * Everything for testing lives behind the one "Debug view" switch, which sets
+ * `body.debug`. Off by default, so a visitor sees a finished map: route lines,
+ * station dots and vehicles, and nothing else.
+ */
+#debug-group { display: none; }
+body.debug #debug-group { display: contents; }
+#debuglog { display: none; }
+body.debug #debuglog { display: block; }
 #debuglog {
   position: fixed; top: 58px; left: 10px; z-index: 1000; margin: 0;
   max-width: min(560px, calc(100vw - 20px)); max-height: 130px; overflow: auto;

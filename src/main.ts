@@ -406,30 +406,16 @@ function updateTargetsFeatures() {
   src?.setData({type: 'FeatureCollection', features})
 }
 
-// --- track shapes only (stations/routes RENDERING commented out for testing) ---
+// --- network layers: route lines and station dots ---
+/**
+ * Keep the debug overlay (target dots, animated paths) above the network. The
+ * two are added from different callbacks — `addTargetsLayers` on map `load`,
+ * these after a fetch — so whichever loses the race has to insert itself below.
+ */
+const belowDebug = (): string | undefined =>
+  ['anim-paths-casing', 'anim-paths-layer', 'targets-layer'].find(id => map.getLayer(id))
+
 async function loadNetworkLayers() {
-  // TESTING: stations layer disabled — only targets render
-  // try {
-  //   const stations = await (await fetch('/stations.json')).json()
-  //   map.addSource('stations', {type: 'geojson', data: stations})
-  //   map.addLayer({
-  //     id: 'stations-layer',
-  //     type: 'circle',
-  //     source: 'stations',
-  //     layout: {visibility: 'none'},
-  //     paint: {'circle-radius': 3, 'circle-color': '#888', 'circle-stroke-color': '#555', 'circle-stroke-width': 1}
-  //   })
-  //   map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
-  //     const name = e.features?.[0]?.properties?.name
-  //     if (name) {
-  //       new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
-  //     }
-  //   })
-  //   map.on('mouseenter', 'stations-layer', () => { map.getCanvas().style.cursor = 'pointer' })
-  //   map.on('mouseleave', 'stations-layer', () => { map.getCanvas().style.cursor = '' })
-  // } catch (err) {
-  //   console.warn('stations layer unavailable', err)
-  // }
   try {
     const routes = await (await fetch('/routes.json')).json()
     lineShapes = {}
@@ -441,23 +427,49 @@ async function loadNetworkLayers() {
         // them all. GeoJSON [lon, lat] -> [lat, lon].
         ;(lineShapes[line] ??= []).push(coords.map((c: [number, number]) => [c[1], c[0]]))
       }
+      const product = f.properties?.product as Product | undefined
+      f.properties = {
+        ...f.properties,
+        color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'
+      }
     }
-    // TESTING: routes layer disabled — only targets render
-    // for (const f of routes.features ?? []) {
-    //   const line = f.properties?.line
-    //   const product = f.properties?.product as Product | undefined
-    //   f.properties = {...f.properties, color: lineColors[line] ?? (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'}
-    // }
-    // map.addSource('routes', {type: 'geojson', data: routes})
-    // map.addLayer({
-    //   id: 'routes-layer',
-    //   type: 'line',
-    //   source: 'routes',
-    //   layout: {visibility: 'none'},
-    //   paint: {'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.75}
-    // })
+    map.addSource('routes', {type: 'geojson', data: routes})
+    map.addLayer({
+      id: 'routes-layer',
+      type: 'line',
+      source: 'routes',
+      // Several variants of a line overlap, so a solid line would stack up to a
+      // dozen deep and read as a thick smear. Thin and faint keeps it a backdrop.
+      paint: {'line-color': ['get', 'color'], 'line-width': 1.5, 'line-opacity': 0.35}
+    }, belowDebug())
   } catch (err) {
     logError(`routes.json unavailable (animation falls back to straight lines): ${err instanceof Error ? err.message : String(err)}`)
+  }
+  try {
+    const stations = await (await fetch('/stations.json')).json()
+    map.addSource('stations', {type: 'geojson', data: stations})
+    map.addLayer({
+      id: 'stations-layer',
+      type: 'circle',
+      source: 'stations',
+      // 1,573 stops: hide them when zoomed out, where they would out-number and
+      // obscure the vehicles the map is actually for.
+      minzoom: 12,
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 1.5, 15, 3.5],
+        'circle-color': '#fff',
+        'circle-stroke-color': '#666',
+        'circle-stroke-width': 1
+      }
+    }, belowDebug())
+    map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
+      const name = e.features?.[0]?.properties?.name
+      if (name) new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
+    })
+    map.on('mouseenter', 'stations-layer', () => { map.getCanvas().style.cursor = 'pointer' })
+    map.on('mouseleave', 'stations-layer', () => { map.getCanvas().style.cursor = '' })
+  } catch (err) {
+    logError(`stations.json unavailable (station dots hidden): ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 loadNetworkLayers()
@@ -570,50 +582,86 @@ lineLabel.append('Lines:')
 lineRow.append(lineLabel, lineInput)
 filterEl.append(lineRow)
 
-const toggleLayer = (layerId: string, name: string) => {
+/** A checkbox that shows or hides one map layer, appended to `parent`. */
+const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLElement) => {
   const label = document.createElement('label')
   label.className = 'layer'
   const cb = document.createElement('input')
   cb.type = 'checkbox'
-  cb.onchange = () => {
+  cb.checked = on
+  const apply = () => {
     if (!map.getLayer(layerId)) return // layers load async
     map.setLayoutProperty(layerId, 'visibility', cb.checked ? 'visible' : 'none')
   }
+  cb.onchange = apply
+  map.on('idle', apply) // re-assert once the layer exists
   label.append(cb, ` ${name}`)
-  filterEl.append(label)
+  parent.append(label)
+  return cb
 }
-// TESTING: stations/routes layers disabled — only targets render
-// toggleLayer('stations-layer', 'Stations')
-// toggleLayer('routes-layer', 'Routes')
+toggleLayer('routes-layer', 'Routes', true, filterEl)
+toggleLayer('stations-layer', 'Stations', true, filterEl)
 
-// Targets: next-stop dots + animated segment paths (debug/test view)
+// --- one Debug switch for the whole test overlay ---
+// Four separate switches were confusing, and the network layers had none at all
+// because their code sat commented out. Everything for testing now lives behind
+// this one control: target dots, animated paths, vehicle IDs, the error panel and
+// the motion recorder. Off by default so the map looks finished; the setting is
+// remembered, and `?debug=1` forces it on.
+const DEBUG_KEY = 'liveberlin.debug'
+const debugRequested = new URLSearchParams(location.search).has('debug')
+const debugGroup = document.createElement('div')
+debugGroup.id = 'debug-group'
+
+const debugLabel = document.createElement('label')
+debugLabel.className = 'layer'
+const debugCb = document.createElement('input')
+debugCb.type = 'checkbox'
+debugCb.checked = debugRequested || localStorage.getItem(DEBUG_KEY) === '1'
+debugLabel.append(debugCb, ' Debug view')
+filterEl.append(debugLabel, debugGroup)
+
+// Targets: next-stop dots + animated segment paths. Not built with toggleLayer,
+// because these three layers depend on the Debug switch as well as their own box.
 const targetsLabel = document.createElement('label')
 targetsLabel.className = 'layer'
 const targetsCb = document.createElement('input')
 targetsCb.type = 'checkbox'
 targetsCb.checked = true
-targetsCb.onchange = () => {
-  for (const id of ['targets-layer', 'anim-paths-layer', 'anim-paths-casing']) {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', targetsCb.checked ? 'visible' : 'none')
+targetsLabel.append(targetsCb, ' Targets')
+debugGroup.append(targetsLabel)
+const TARGET_LAYERS = ['targets-layer', 'anim-paths-layer', 'anim-paths-casing']
+const applyTargets = () => {
+  const vis = debugCb.checked && targetsCb.checked ? 'visible' : 'none'
+  for (const id of TARGET_LAYERS) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis)
   }
 }
-targetsLabel.append(targetsCb, ' Targets')
+targetsCb.onchange = applyTargets
+map.on('idle', applyTargets) // re-assert once the layers exist
 
-filterEl.append(targetsLabel)
-
-// Vehicle IDs: short unique label attached under each badge (see shortId). On
-// by default for debugging; uncheck, or narrow with Lines, when it gets busy.
+// Vehicle IDs: short unique label under each badge (see shortId), so a specific
+// vehicle can be reported by name.
 const idsLabel = document.createElement('label')
 idsLabel.className = 'layer'
 const idsCb = document.createElement('input')
 idsCb.type = 'checkbox'
 idsCb.checked = true
-idsCb.onchange = () => document.body.classList.toggle('show-vids', idsCb.checked)
-document.body.classList.toggle('show-vids', idsCb.checked)
 idsLabel.append(idsCb, ' IDs')
-filterEl.append(idsLabel)
+debugGroup.append(idsLabel)
 
-// --- motion recording controls (debug view) ---
+function applyDebug() {
+  const on = debugCb.checked
+  document.body.classList.toggle('debug', on)
+  document.body.classList.toggle('show-vids', on && idsCb.checked)
+  applyTargets()
+  localStorage.setItem(DEBUG_KEY, on ? '1' : '0')
+}
+debugCb.onchange = applyDebug
+idsCb.onchange = applyDebug
+applyDebug()
+
+// --- motion recording controls (inside the debug group) ---
 const recRow = document.createElement('div')
 recRow.className = 'mode'
 const recLabel = document.createElement('label')
@@ -654,7 +702,7 @@ setInterval(() => {
 
 recLabel.append(recCb, ' Record motion', recStatus)
 recRow.append(recLabel, saveBtn)
-filterEl.append(recRow)
+debugGroup.append(recRow)
 
 /**
  * Debug handle for headless checks (console capture is unreliable — see
