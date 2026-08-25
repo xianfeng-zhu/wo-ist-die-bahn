@@ -115,10 +115,15 @@ describe('buildSegmentPath with variants', () => {
   })
 })
 
-// Ties are NOT broken here. Breaking them by track length was tried and
-// measured worse on drift, dwell and overspeed (see pickShape's note), so the
-// instability is documented rather than papered over. What must hold is that a
-// clearly better fit always wins.
+// Ties ARE broken, by array order: pickShape uses a strict `<`, and
+// prepare-data.mjs emits variants longest-first. That was the dominant path
+// while 83% of live choices tied within 0.5 m. Dropping variants contained in a
+// longer one removed most of those ties at the source (1,599 corridors -> 264
+// variants), so the tie-break matters far less than it did. Breaking ties by
+// track length was tried explicitly and measured worse (drift p90 61 -> 106 m,
+// dwell p90 12 -> 43 s, overspeed 0 -> 8), because it prefers full-line and
+// full-ring variants and projection onto a long or closed shape is itself
+// ambiguous. What must hold regardless: a clearly better fit always wins.
 describe('pickShape fit precedence', () => {
   const short: Array<[number, number]> = [[52.50, 13.40], [52.50 + m(600), 13.40]]
   const long: Array<[number, number]> = [[52.50, 13.40], [52.50 + m(600), 13.40], [52.50 + m(3000), 13.40]]
@@ -150,5 +155,27 @@ describe('pickShape early exit', () => {
       const full = cands.reduce((b, s) => (maxResidualM(s, pts) < maxResidualM(b, pts) ? s : b), cands[0])
       expect(pickShape(cands, pts)).toBe(full)
     }
+  })
+})
+
+describe('pickShape edge cases', () => {
+  it('handles a stationary vehicle, whose forecast is four identical points', () => {
+    const still: Array<[number, number]> = [
+      [52.50 + m(300), 13.40], [52.50 + m(300), 13.40],
+      [52.50 + m(300), 13.40], [52.50 + m(300), 13.40]
+    ]
+    const picked = pickShape([trunk, branch], still)
+    // both pass through that point, so either is acceptable; what matters is
+    // that it returns one and does not throw
+    expect([trunk, branch]).toContain(picked)
+  })
+
+  it('returns the first USABLE shape when the forecast is empty', () => {
+    const stub: Array<[number, number]> = [[52.9, 13.9]]
+    expect(pickShape([stub, trunk], [])).toBe(trunk)
+  })
+
+  it('returns undefined when every candidate is degenerate', () => {
+    expect(pickShape([[[52.9, 13.9]], [[52.8, 13.8]]], [[52.5, 13.4]])).toBeUndefined()
   })
 })

@@ -96,3 +96,37 @@ describe('simplifyPath', () => {
     expect(simplifyPath([north(0), north(0), north(0), north(100)], 10)).toHaveLength(2)
   })
 })
+
+describe('simplifyPath edge cases', () => {
+  it('handles a closed loop (first point equals last)', () => {
+    // the S41/S42 case, and the only input that hits the zero-length branch
+    const loop = []
+    for (let i = 0; i <= 360; i++) {
+      const a = (i * Math.PI) / 180
+      loop.push([
+        52.5 + (2000 * Math.sin(a)) / 111320,
+        13.4 + (2000 * Math.cos(a)) / (111320 * Math.cos((52.5 * Math.PI) / 180))
+      ])
+    }
+    const out = simplifyPath(loop, 10)
+    expect(out.length).toBeLessThan(loop.length)
+    expect(out.length).toBeGreaterThan(3)
+    expect(out[0]).toEqual(loop[0])
+    expect(out[out.length - 1]).toEqual(loop[loop.length - 1])
+  })
+
+  it('handles a large input without blowing the stack', () => {
+    // the stated reason the implementation is iterative rather than recursive
+    const big = []
+    for (let i = 0; i < 60000; i++) big.push([52.5 + i / 1e7, 13.4 + Math.sin(i / 50) / 1e4])
+    let out
+    expect(() => { out = simplifyPath(big, 10) }).not.toThrow()
+    expect(out.length).toBeLessThan(big.length)
+  })
+
+  it('keeps a spike that a coarse tolerance would still notice', () => {
+    const line = [north(0), north(1000), north(2000)]
+    line.splice(2, 0, [north(1500)[0], east(80)[1]])
+    expect(simplifyPath(line, 10)).toHaveLength(4)
+  })
+})

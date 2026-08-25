@@ -24,17 +24,19 @@ export type LineShapes = Record<string, Shape[]>
  * Returns its best candidate however poorly it fits; the caller applies its own
  * limit, so the fit threshold stays in one place (SHAPE_FIT_LIMIT_M).
  *
- * KNOWN LIMITATION — the choice is not stable. Variants of one line overlap, and
- * a 30 s forecast is only four points, so many candidates fit equally well:
- * measured on live data, the median gap to the runner-up is 0.0 m and 310 of 319
- * vehicles are within 5 m. 42% of vehicles therefore change variant within 60 s,
- * 21% of them while their declared stop never changed, which swaps the path
- * under the animation. Breaking ties by track length was tried and measured
- * WORSE on every other axis (drift p90 61 -> 106 m, dwell p90 12 -> 43 s,
- * overspeed 0 -> 8), because it prefers full-line and full-ring variants, and
- * projecting onto a long or closed shape is itself ambiguous. A stable fix needs
- * hysteresis (remember the variant on AnimState and keep it while it still fits)
- * or a tie-break on which variant actually reaches the declared stop.
+ * The choice is not perfectly stable, but most of the reason it was not has been
+ * removed at source. Variants of one line overlap and a 30 s forecast is only
+ * four points, so many candidates once fit equally well: the median gap to the
+ * runner-up was 0.0 m and 42% of vehicles changed variant within 60 s, swapping
+ * the path under a running animation. Most of those candidates were sub-slices
+ * of a longer variant, which `prepare-data.mjs` now drops (1,599 corridors ->
+ * 264 variants, ambiguity 83% -> 53%). Breaking the remaining ties by track
+ * length was tried and measured WORSE on every other axis (drift p90 61 -> 106 m,
+ * dwell p90 12 -> 43 s, overspeed 0 -> 8), because it prefers full-line and
+ * full-ring variants and projecting onto a long or closed shape is itself
+ * ambiguous. If the residue ever matters, hysteresis on `AnimState` is the next
+ * step — not a length preference.
+ *
  */
 export function pickShape(shapes: Shape[] | undefined, pts: Shape): Shape | undefined {
   if (!shapes || shapes.length === 0) return undefined
