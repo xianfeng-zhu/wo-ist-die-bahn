@@ -97,6 +97,40 @@ export function filterVehicles(vehicles: Vehicle[], filters: Filters, lines?: Re
   return vehicles.filter(v => filters[v.product] && (!lines || lines.has(v.line)))
 }
 
+/** One line seen running, with its type and the time it was last seen. */
+export interface LineSighting {
+  product: Product
+  seen: number
+}
+
+/**
+ * Fold one poll into the table of lines running now, editing it in place.
+ *
+ * A line stays in the table for `lingerMs` after its last sighting, so one poll
+ * that misses a line's only vehicle does not remove it. Returns true when the
+ * names in the table changed, or a line changed type — the caller rebuilds its
+ * menus only then, so an open menu does not redraw under the user's pointer.
+ */
+export function recordLineSightings(
+  table: Map<string, LineSighting>,
+  entries: Iterable<readonly [string, Product]>,
+  now: number,
+  lingerMs: number
+): boolean {
+  let changed = false
+  for (const [name, product] of entries) {
+    if (!name) continue
+    if (table.get(name)?.product !== product) changed = true
+    table.set(name, {product, seen: now})
+  }
+  for (const [name, e] of table) {
+    if (now - e.seen <= lingerMs) continue
+    table.delete(name)
+    changed = true
+  }
+  return changed
+}
+
 export function productFromCls(cls: number | undefined): Product | null {
   return cls != null ? PRODUCT_BY_CLS[cls] ?? null : null
 }

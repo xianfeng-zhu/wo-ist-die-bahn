@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest'
-import type {Product} from './vehicle.js'
-import {compareLineNames, delayFrom, filterVehicles, productFromCls, shortId, transformJourney} from './vehicle.js'
+import type {LineSighting, Product} from './vehicle.js'
+import {compareLineNames, delayFrom, filterVehicles, productFromCls, recordLineSightings, shortId, transformJourney} from './vehicle.js'
 
 describe('productFromCls', () => {
   it('maps HAFAS cls bitmask to rail products', () => {
@@ -244,5 +244,59 @@ describe('compareLineNames', () => {
     expect(compareLineNames('U8', 'U8')).toBe(0)
     expect(sorted(['', 'U1'])).toEqual(['', 'U1'])
     expect(() => sorted(['FEX', 'RE1', 'X9'])).not.toThrow()
+  })
+})
+
+describe('recordLineSightings', () => {
+  const LINGER = 60000
+  const seed = (): Map<string, LineSighting> => {
+    const t = new Map<string, LineSighting>()
+    recordLineSightings(t, [['M10', 'tram'], ['U8', 'subway']], 1000, LINGER)
+    return t
+  }
+
+  it('reports a change the first time a line is seen', () => {
+    const table = new Map<string, LineSighting>()
+    expect(recordLineSightings(table, [['M10', 'tram']], 1000, LINGER)).toBe(true)
+    expect([...table.keys()]).toEqual(['M10'])
+  })
+
+  it('reports no change when the same lines are seen again', () => {
+    const table = seed()
+    expect(recordLineSightings(table, [['M10', 'tram'], ['U8', 'subway']], 11000, LINGER)).toBe(false)
+    expect([...table.keys()]).toEqual(['M10', 'U8'])
+  })
+
+  it('keeps a line that one poll missed, so the menu does not jump', () => {
+    const table = seed()
+    // U8 absent, but only 10 s since it was last seen
+    expect(recordLineSightings(table, [['M10', 'tram']], 11000, LINGER)).toBe(false)
+    expect(table.has('U8')).toBe(true)
+  })
+
+  it('drops a line that has been gone longer than the linger window', () => {
+    const table = seed()
+    expect(recordLineSightings(table, [['M10', 'tram']], 1000 + LINGER + 1, LINGER)).toBe(true)
+    expect([...table.keys()]).toEqual(['M10'])
+  })
+
+  it('refreshes the sighting time, so a line running all day is never dropped', () => {
+    const table = seed()
+    for (let t = 11000; t < 600000; t += 10000) {
+      recordLineSightings(table, [['M10', 'tram'], ['U8', 'subway']], t, LINGER)
+    }
+    expect([...table.keys()]).toEqual(['M10', 'U8'])
+  })
+
+  it('reports a change when a line changes type', () => {
+    const table = seed()
+    expect(recordLineSightings(table, [['M10', 'subway'], ['U8', 'subway']], 11000, LINGER)).toBe(true)
+    expect(table.get('M10')?.product).toBe('subway')
+  })
+
+  it('ignores an empty line name', () => {
+    const table = new Map<string, LineSighting>()
+    expect(recordLineSightings(table, [['', 'tram']], 1000, LINGER)).toBe(false)
+    expect(table.size).toBe(0)
   })
 })

@@ -2,7 +2,7 @@ import {Map as GLMap, Marker, Popup, setWorkerUrl, type FilterSpecification, typ
 import 'maplibre-gl/dist/maplibre-gl.css'
 import './style.css'
 import {fetchVehicles, BBox} from './hci.js'
-import {compareLineNames, filterVehicles, Product, shortId, Vehicle} from './vehicle.js'
+import {compareLineNames, filterVehicles, LineSighting, Product, recordLineSightings, shortId, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
@@ -114,9 +114,9 @@ const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: t
  * nothing, exactly as unticking every type does.
  *
  * `lineMode` tracks whether the user has narrowed it. In `'all'` the selection
- * follows the network: every known line of every enabled type stays ticked, and
- * a line discovered later joins it. That also keeps the app correct before
- * tracks.json has loaded, when nothing is known yet.
+ * follows the network: every line of every enabled type stays ticked, and a line
+ * that starts running later joins it. That also keeps the app correct before the
+ * first poll has answered, when no line is known yet.
  */
 let lineFilter = new Set<string>()
 let lineMode: 'all' | 'custom' = 'all'
@@ -476,7 +476,6 @@ async function loadNetworkLayers() {
   // compound their opacity into a solid smear.
   try {
     const tracks = await (await fetch(asset('tracks.json'))).json()
-    const learned: Array<[string, Product]> = []
     for (const f of tracks.features ?? []) {
       // One feature per rendered COLOUR, covering every line that shares it, so a
       // street used by ten tram lines gets one stroke rather than ten identical
@@ -491,12 +490,7 @@ async function loadNetworkLayers() {
           ? group
           : (product ? PRODUCT_COLORS[product] : undefined) ?? '#888'
       }
-      for (const line of (f.properties?.lines ?? []) as string[]) {
-        if (product) learned.push([line, product])
-      }
     }
-    // the menus list every line in the network, not just the ones running now
-    learnLines(learned)
     map.addSource('routes', {type: 'geojson', data: tracks})
     map.addLayer({
       id: 'routes-layer',
@@ -558,9 +552,8 @@ async function poll() {
     failures = 0
     nextDelay = POLL_INTERVAL_MS
     conn = 'live'
-    // top up the menus: a line running now but absent from tracks.json (a new
-    // service, or ?all=1 widening the product mask) must still be selectable
-    learnLines(vehicles.map(v => [v.line, v.product] as [string, Product]))
+    // the menus offer exactly what is running, so refresh them from every poll
+    updateLiveLines(vehicles.map(v => [v.line, v.product] as [string, Product]))
     if (recorder) {
       const drawn = new Map<string, [number, number]>()
       for (const [id, s] of animStates) if (s.renderPos) drawn.set(id, s.renderPos)
@@ -629,18 +622,33 @@ map.on('click', () => { if (document.body.classList.contains('settings-open')) s
  * ctrl/cmd-click to pick more than one and is close to unusable on a touch
  * screen. The summary shows the current choice, so the panel stays compact.
  *
- * Both still drive the same `filterVehicles(vehicles, filters, lineFilter)`: every
- * type ticked sets all products true, and no line ticked leaves the line set
- * empty, which already means "all". So the filter logic and its tests are
- * unchanged.
+ * Both menus list only what is running right now — see `liveLines`. There is no
+ * point offering a line that cannot put a vehicle on the map.
+ *
+ * Both drive the same `filterVehicles(vehicles, filters, lineFilter)`. An empty
+ * line set means NONE, not all, which is what lets "All lines" untick everything
+ * the way "All types" does; `lineMode` carries "all" instead.
  */
 
 /**
- * Every line the app knows about, with its type. Seeded from tracks.json so the
- * list is complete and stable rather than only what happens to be running, then
- * topped up from live data so a line can never be missing from the menu.
+ * The lines that are running right now, with the type and the last sighting of
+ * each. Built from the live polls, and from nothing else.
+ *
+ * It used to be seeded from tracks.json, which listed all 190 lines in the
+ * network. Most of them select nothing: a Sunday morning has about 90 lines out,
+ * and a night has far fewer, so the menu was mostly dead entries and you could
+ * not tell which was which.
  */
-const knownLines = new Map<string, Product>()
+const liveLines = new Map<string, LineSighting>()
+
+/**
+ * Keep a line in the menu this long after its last sighting.
+ *
+ * Without it the menu would rebuild whenever one poll missed a line's only
+ * vehicle, and rows would move under the pointer. Six polls of silence is a line
+ * that has really stopped.
+ */
+const LINE_LINGER_MS = 60000
 
 /** A dropdown holding a checkbox list. Returns the parts the caller fills in. */
 function multiSelect(title: string) {
@@ -660,9 +668,9 @@ function multiSelect(title: string) {
 const typeUi = multiSelect('Type')
 const lineUi = multiSelect('Line')
 
-/** Types that actually have lines, in the order PRODUCT_LABELS declares them. */
+/** Types with a line running now, in the order PRODUCT_LABELS declares them. */
 const presentTypes = (): Product[] => {
-  const have = new Set(knownLines.values())
+  const have = new Set([...liveLines.values()].map(e => e.product))
   return (Object.keys(PRODUCT_LABELS) as Product[]).filter(p => have.has(p))
 }
 
@@ -691,20 +699,39 @@ function describeTypes(): string {
   return on.map(p => PRODUCT_LABELS[p]).join(', ')
 }
 
-/** Lines that could be shown right now: those of the ticked types. */
+/** Lines that could be shown right now: running, and of a ticked type. */
 const selectableLines = (): string[] =>
-  [...knownLines].filter(([, p]) => filters[p]).map(([n]) => n)
+  [...liveLines].filter(([, e]) => filters[e.product]).map(([n]) => n)
 
 function describeLines(): string {
   if (lineMode === 'all') return 'all'
-  if (lineFilter.size === 0) return 'none'
-  const names = [...lineFilter].sort(compareLineNames)
+  // count only what the menu offers: a line the user picked can stop running,
+  // and it stays in the selection so it returns ticked, but naming it here would
+  // report vehicles that are not on the map
+  const names = selectableLines().filter(n => lineFilter.has(n)).sort(compareLineNames)
+  if (names.length === 0) return 'none'
   return names.length <= 3 ? names.join(', ') : `${names.length} lines`
 }
 
+/** A greyed line of explanation, for a menu that has nothing to offer yet. */
+function hint(text: string): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'multi-hint'
+  el.textContent = text
+  return el
+}
+
+/** Shown until the first poll answers, and if the feed goes down before it does. */
+const WAITING = 'waiting for live data…'
+
 function rebuildTypes() {
   const types = presentTypes()
-  const allOn = types.length > 0 && types.every(p => filters[p])
+  if (types.length === 0) {
+    typeUi.body.replaceChildren(hint(WAITING))
+    typeUi.caption.textContent = '…'
+    return
+  }
+  const allOn = types.every(p => filters[p])
   typeUi.body.replaceChildren(
     checkRow('All types', allOn, on => {
       for (const p of types) filters[p] = on
@@ -731,7 +758,7 @@ function rebuildTypes() {
 /** Forget any picked line whose type is no longer shown. */
 function dropHiddenLines() {
   for (const name of [...lineFilter]) {
-    const p = knownLines.get(name)
+    const p = liveLines.get(name)?.product
     if (p && !filters[p]) lineFilter.delete(name)
   }
 }
@@ -748,7 +775,13 @@ function makeSelectionExplicit() {
 
 function rebuildLines() {
   const all = selectableLines()
-  const everyOne = all.length > 0 && all.every(lineTicked)
+  if (all.length === 0) {
+    // no line to offer: either no data yet, or every type is switched off
+    lineUi.body.replaceChildren(hint(liveLines.size === 0 ? WAITING : 'no type selected'))
+    lineUi.caption.textContent = describeLines()
+    return
+  }
+  const everyOne = all.every(lineTicked)
   lineUi.body.replaceChildren(
     // Ticks and unticks every line, like "All types" does for the types. Before,
     // this only ticked itself: the selection meant "all" by being empty, so the
@@ -767,7 +800,7 @@ function rebuildLines() {
   )
   for (const p of presentTypes()) {
     if (!filters[p]) continue // only offer lines you could actually see
-    const names = [...knownLines].filter(([, prod]) => prod === p).map(([n]) => n).sort(compareLineNames)
+    const names = [...liveLines].filter(([, e]) => e.product === p).map(([n]) => n).sort(compareLineNames)
     if (names.length === 0) continue
     const head = document.createElement('div')
     head.className = 'multi-group'
@@ -788,15 +821,9 @@ function rebuildLines() {
   lineUi.caption.textContent = describeLines()
 }
 
-/** Add any lines we have not seen before; rebuild the menus only if that happens. */
-function learnLines(entries: Iterable<[string, Product]>) {
-  let added = false
-  for (const [name, product] of entries) {
-    if (!name || knownLines.has(name)) continue
-    knownLines.set(name, product)
-    added = true
-  }
-  if (!added) return
+/** Record the lines seen in a poll, and rebuild the menus if the list changed. */
+function updateLiveLines(entries: Iterable<readonly [string, Product]>) {
+  if (!recordLineSightings(liveLines, entries, Date.now(), LINE_LINGER_MS)) return
   rebuildTypes()
   rebuildLines()
 }

@@ -142,3 +142,5 @@ body.dense .vid { display: none; }
   margin: 4px 0 1px; color: #666; font: 600 10px system-ui;
   text-transform: uppercase; letter-spacing: .04em;
 }
+/* the menus hold only lines that are running, so they can be empty for a moment */
+#filters .multi-hint { color: #888; font-style: italic; padding: 2px 0; }

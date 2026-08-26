@@ -14,7 +14,7 @@ is invented from a timetable.
 ```sh
 npm install
 npm run build          # -> dist/
-npm test               # 174 tests
+npm test               # 182 tests
 npm run dev            # http://localhost:5173
 ```
 
