@@ -9,10 +9,15 @@ import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
 import type {FrameEntry} from './recorder.js'
 
+// Everything under public/ is served from the deployment's base path, which is
+// NOT the domain root on GitHub Pages (a project site lives at /<repo>/). Vite
+// rewrites index.html for us, but URLs built at runtime have to add it here.
+const asset = (name: string): string => `${import.meta.env.BASE_URL}${name}`
+
 // MapLibre loads its tile-processing worker from an external file relative to
 // the module; Vite doesn't emit it, so point it at the copy we ship in
 // public/ (see public/maplibre-gl-worker.mjs).
-setWorkerUrl('/maplibre-gl-worker.mjs')
+setWorkerUrl(asset('maplibre-gl-worker.mjs'))
 
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
 const POLL_INTERVAL_MS = 10000 // matches the official VBB livemap (Livemap.timeout = 10)
@@ -56,7 +61,19 @@ const map = new GLMap({
         tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
         tileSize: 256,
         maxzoom: 19,
-        attribution: 'Live data: VBB &middot; &copy; OpenStreetMap contributors'
+        /*
+         * Both credits must be links, not plain text.
+         *
+         * CC BY 4.0 requires the VBB credit to name the licence and be traceable
+         * to the source. The OSM Foundation attribution guidelines require a way
+         * to reach the licence and data origin — plain text gave a visitor no
+         * route to either. See ATTRIBUTION.md.
+         */
+        attribution:
+          'Data: <a href="https://unternehmen.vbb.de/digitale-services/datensaetze/" ' +
+          'target="_blank" rel="noopener">VBB</a> (CC BY 4.0, modified) &middot; ' +
+          '&copy; <a href="https://www.openstreetmap.org/copyright" ' +
+          'target="_blank" rel="noopener">OpenStreetMap</a> contributors'
       }
     },
     layers: [{id: 'osm', type: 'raster', source: 'osm'}]
@@ -439,7 +456,7 @@ async function loadNetworkLayers() {
   // routes.json is ANIMATION data: one entry per route variant, because each
   // vehicle needs a short, unambiguous shape to project onto. It is not drawn.
   try {
-    const routes = await (await fetch('/routes.json')).json()
+    const routes = await (await fetch(asset('routes.json'))).json()
     lineShapes = {}
     for (const f of routes.features ?? []) {
       const line = f.properties?.line
@@ -458,7 +475,7 @@ async function loadNetworkLayers() {
   // instead put a dozen strokes on a shared tram street, and stacked strokes
   // compound their opacity into a solid smear.
   try {
-    const tracks = await (await fetch('/tracks.json')).json()
+    const tracks = await (await fetch(asset('tracks.json'))).json()
     const learned: Array<[string, Product]> = []
     for (const f of tracks.features ?? []) {
       // One feature per rendered COLOUR, covering every line that shares it, so a
@@ -499,7 +516,7 @@ async function loadNetworkLayers() {
     logError(`tracks.json unavailable (route lines hidden): ${err instanceof Error ? err.message : String(err)}`)
   }
   try {
-    const stations = await (await fetch('/stations.json')).json()
+    const stations = await (await fetch(asset('stations.json'))).json()
     map.addSource('stations', {type: 'geojson', data: stations})
     map.addLayer({
       id: 'stations-layer',
