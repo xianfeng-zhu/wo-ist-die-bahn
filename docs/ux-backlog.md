@@ -58,7 +58,12 @@ That reads as the pulse of the city, which is fine — but only once the base ma
 stops shouting. Do this before considering clustering, which would break the
 live-motion quality that makes the map worth watching.
 
-## 6. Touch targets are too small in the filter list — open
+## 6. Touch targets are too small — PARTLY DONE
+
+Station dots are fixed: 1.5 px at z12 and 3.5 at z15 became 3–7 px with a
+separate invisible 10–16 px circle that exists only to take the tap.
+
+Still open: the filter list.
 
 Measured on a 390 px phone: checkboxes **13×13 px**, rows **19 px** tall, in a
 210 px scroller holding 208 rows — about **21 screens** of scrolling. Apple and
@@ -127,3 +132,12 @@ All five shipped. Decisions taken along the way, for the record:
   shared.
 - Strip dots are evenly spaced, with the marker positioned proportionally.
 - The status line keeps a quiet warning when the feed is stale, offline or capped.
+
+Follow-up round, after using it:
+
+- The selected vehicle takes a ring and the rest fade back; the map follows it,
+  centred on the part of the map the panel is not covering.
+- Station dots are bigger, with an invisible hit circle behind them.
+- Picking a line from search frames every vehicle of that line.
+- Tapping the map dismisses the panel; tapping a station opens its board instead.
+- Back and Close are both on the panel, on both layouts.
