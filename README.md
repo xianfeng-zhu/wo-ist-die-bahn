@@ -7,6 +7,18 @@ A static web app. There is no backend: the browser polls VBB's live endpoint
 directly every 20 seconds, and moves each vehicle in between using the operator's
 own short-term forecast. Nothing about the motion is invented from a timetable.
 
+**Tap a vehicle** for its whole journey — every stop with its time, the ones it
+has passed greyed out, and a marker that tracks its position between two stops.
+Its route is drawn on the map while the panel is open.
+
+**Tap a stop** for a departure board grouped by mode, with countdowns. Tap a
+departure to follow that vehicle.
+
+**Search** a stop or a line from the box at the top; results appear as you type.
+
+Panels are addressable, so the back button closes them and a stop's board is a
+link you can send.
+
 S-Bahn, U-Bahn and trams follow their real GTFS track. The other modes follow the
 operator's forecast polyline, which is road geometry for the next 30 seconds.
 
@@ -17,7 +29,7 @@ operator's forecast polyline, which is road geometry for the next 30 seconds.
 ```sh
 npm install
 npm run build          # -> dist/
-npm test               # 197 tests
+npm test               # 268 tests
 npm run dev            # http://localhost:5173
 ```
 

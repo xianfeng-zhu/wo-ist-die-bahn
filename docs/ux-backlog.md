@@ -11,7 +11,7 @@ not yet agreed.
 
 ---
 
-## 1. Arrival times are already in memory and never shown — scheduled
+## 1. Arrival times are already in memory and never shown — DONE
 
 The vehicle popup says `next: S Westend`. Held for that same vehicle at that
 moment: `toStop.t = 23:25`, plus a four-stop summary with a time on each —
@@ -24,7 +24,7 @@ Beyond the four stopovers, `JourneyDetails` on the existing gate returns the
 **full** journey — verified: 31 stops with times, plus a route polyline, against
 the 4 the radar gives. One request per tapped vehicle.
 
-## 2. Tapping a station tells you its name and nothing else — scheduled
+## 2. Tapping a station tells you its name and nothing else — DONE
 
 The question people have while standing at a stop is *what is coming, and when*.
 Station dots are currently decoration.
@@ -40,13 +40,13 @@ No geolocate control. On a phone this is the first thing a transit map should
 offer. MapLibre ships `GeolocateControl`; this is a control registration, not a
 feature build.
 
-## 4. No place search — scheduled
+## 4. No place search — DONE
 
 The only search box searches line names. You cannot find Alexanderplatz or your
 own street. `public/stations.json` already ships 1,573 stops with coordinates, so
 station search needs no API at all — but see item 2 on the missing ids.
 
-## 5. The base map fights the data — scheduled
+## 5. The base map fights the data — DONE
 
 At city scale, OSM's bright yellow and orange roads compete with the vehicle dots
 for attention. `raster-saturation` on the existing raster layer makes the city the
@@ -67,14 +67,15 @@ Google both ask for 44–48 px.
 Note the inconsistency: `.veh::after` already gives vehicle badges a 44 px tap
 area on coarse pointers. The care was taken once and not carried into the panel.
 
-## 7. Two small accessibility bugs — open
+## 7. Two small accessibility bugs — PARTLY DONE
 
-- A badge reads to a screen reader as **"S4291274-0"**: the debug id span is
-  `display:none` but still in `textContent`, so it runs into the line name. It
-  needs `aria-hidden`, and the badge needs a real `aria-label`
-  ("S42 S-Bahn to Südkreuz").
-- The badge is focusable (MapLibre sets `tabindex=0`) but has no `role`, so it
-  does not announce as something you can activate.
+- ~~A badge reads to a screen reader as **"S4291274-0"**~~ — fixed. The debug id
+  span is now `aria-hidden`, and the badge carries a real `aria-label`.
+- ~~The badge is focusable but has no `role`~~ — fixed, it is a `button` and
+  responds to Enter and Space.
+- Still open: the filter list and the departure rows have no keyboard focus
+  outline of their own beyond the browser default, and the panel does not trap or
+  restore focus when it opens and closes.
 
 Focus rings were checked with a real Tab press and are **fine**
 (`outline: auto`, `:focus-visible` matches). Not a defect.
@@ -85,7 +86,7 @@ No `meta description`, no `theme-color`, no `og:image`, no manifest. Sharing the
 URL produces a bare link with no preview; on Android the browser chrome stays
 unthemed.
 
-## 9. The status line reads like a debug log — scheduled
+## 9. The status line reads like a debug log — DONE
 
 `live · 697 vehicles · updated 14s ago`. With a 20 s poll it will often sit at
 15–20 s, which looks stale to someone who does not know the design, and "697
@@ -117,3 +118,12 @@ type, each result clickable through to the vehicle or station panel.
 **Base map** — desaturate it (item 5).
 
 **Status line** — put it behind the debug view (item 9).
+
+All five shipped. Decisions taken along the way, for the record:
+
+- Stop ids come from GTFS (`extId` = `stop_id`), which also collapsed 1,573
+  platform dots into 672 station dots.
+- Panels are addressable in the URL, so Back closes them and a board can be
+  shared.
+- Strip dots are evenly spaced, with the marker positioned proportionally.
+- The status line keeps a quiet warning when the feed is stale, offline or capped.
