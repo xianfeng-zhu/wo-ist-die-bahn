@@ -28,6 +28,8 @@ export interface PanelContent {
   accentText?: string
   /** The scrolling content. */
   body: HTMLElement
+  /** Show the Back control — there is a previous panel of ours to return to. */
+  canGoBack?: boolean
 }
 
 const COMPACT_MAX_WIDTH = 720
@@ -39,9 +41,12 @@ export class Panel {
   private readonly subtitleEl: HTMLElement
   private readonly bodyEl: HTMLElement
   private readonly closeBtn: HTMLButtonElement
+  private readonly backBtn: HTMLButtonElement
   private open = false
-  /** Called when the user closes it — by button, Escape or backdrop. */
+  /** Called when the user closes it — by button, Escape or a tap outside. */
   onClose: (() => void) | null = null
+  /** Called when the user presses Back. */
+  onBack: (() => void) | null = null
 
   constructor(parent: HTMLElement = document.body) {
     this.root = document.createElement('aside')
@@ -63,6 +68,26 @@ export class Panel {
     this.subtitleEl.className = 'detail-sub'
     text.append(this.titleEl, this.subtitleEl)
 
+    /*
+     * Back AND close, on both layouts.
+     *
+     * They do different things and both are needed. Following a stop's board into
+     * a vehicle's journey and then into another stop's board is a natural path, so
+     * Back has to step one link at a time. Close has to get out of all of it in one
+     * press — a reader three levels deep should not have to tap Back three times to
+     * see the map again.
+     *
+     * Back is only shown when there is somewhere of ours to go back to, so it is
+     * never a dead control.
+     */
+    this.backBtn = document.createElement('button')
+    this.backBtn.type = 'button'
+    this.backBtn.className = 'detail-back'
+    this.backBtn.setAttribute('aria-label', 'Back')
+    this.backBtn.textContent = '‹'
+    this.backBtn.hidden = true
+    this.backBtn.onclick = () => this.onBack?.()
+
     this.closeBtn = document.createElement('button')
     this.closeBtn.type = 'button'
     this.closeBtn.className = 'detail-close'
@@ -70,7 +95,7 @@ export class Panel {
     this.closeBtn.textContent = '✕'
     this.closeBtn.onclick = () => this.requestClose()
 
-    this.header.append(text, this.closeBtn)
+    this.header.append(this.backBtn, text, this.closeBtn)
     this.bodyEl = document.createElement('div')
     this.bodyEl.className = 'detail-body'
     this.root.append(this.header, this.bodyEl)
@@ -108,6 +133,8 @@ export class Panel {
     this.header.style.background = accent
     this.header.style.color = content.accentText ?? '#ffffff'
     this.closeBtn.style.color = content.accentText ?? '#ffffff'
+    this.backBtn.style.color = content.accentText ?? '#ffffff'
+    this.backBtn.hidden = !content.canGoBack
     this.bodyEl.replaceChildren(content.body)
     this.bodyEl.scrollTop = 0
     this.root.setAttribute('aria-label', content.title)

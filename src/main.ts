@@ -174,6 +174,9 @@ map.on('zoom', applyZoomClass)
 applyZoomClass()
 
 map.on('moveend', () => {
+  // Following moves the map every frame; persisting that would hammer localStorage
+  // and store a position the user never chose.
+  if (followSelected) return
   const c = map.getCenter()
   try {
     localStorage.setItem(VIEW_KEY, JSON.stringify({lng: c.lng, lat: c.lat, zoom: map.getZoom()}))
@@ -446,6 +449,11 @@ function render() {
       m = new Marker({element: badgeElement(v)})
         .setLngLat([v.lon, v.lat])
         .addTo(map)
+      // a marker created after the selection was made still has to reflect it
+      if (selectedVehicleId !== null) {
+        if (v.id === selectedVehicleId) m.getElement().classList.add('is-selected')
+        else m.setOpacity(DIM_OPACITY)
+      }
       markers.set(v.id, m)
     }
     updateSegment(v, m)
@@ -490,6 +498,11 @@ function frame(rafNow: number) {
       // still short of the computed position => the limiter is correcting
       s.correcting = metresBetween(s.renderPos, target) > 1e-9
       m.setLngLat([s.renderPos[1], s.renderPos[0]])
+      // Follow on the DRAWN position, not the reported one, so the map moves as
+      // smoothly as the badge does.
+      if (followSelected && id === selectedVehicleId) {
+        centreOnVisible([s.renderPos[1], s.renderPos[0]])
+      }
     }
     if (recorder) {
       const entries: FrameEntry[] = []
@@ -557,6 +570,7 @@ function addTargetsLayers() {
     paint: {'circle-radius': ZOOM_WIDTH(7), 'circle-color': '#ff6d00', 'circle-stroke-color': '#fff', 'circle-stroke-width': ZOOM_WIDTH(2.5)}
   })
   map.on('click', 'targets-layer', (e: MapLayerMouseEvent) => {
+    markMapTapHandled()
     const name = e.features?.[0]?.properties?.name
     if (name) new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
   })
@@ -677,13 +691,33 @@ async function loadNetworkLayers() {
       // obscure the vehicles the map is actually for.
       minzoom: 12,
       paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 1.5, 15, 3.5],
-        'circle-color': '#fff',
-        'circle-stroke-color': '#666',
-        'circle-stroke-width': 1
+        // Was 1.5 px at z12 and 3.5 at z15, which is too small to see and far too
+        // small to hit. Now a dot you can read at a glance, and the ring is dark
+        // enough to hold against the desaturated base map.
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 14, 5, 16, 7],
+        'circle-color': '#ffffff',
+        'circle-stroke-color': '#37474f',
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 12, 1.5, 16, 2.5],
+        'circle-opacity': 0.95
       }
     }, belowDebug())
-    map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
+    /*
+     * A separate, invisible circle that is only there to be tapped.
+     *
+     * A finger is about 44 px and a station dot is 6-14 px, so hit-testing the
+     * visible dot means missing it. MapLibre hit-tests geometry, not paint, so a
+     * transparent circle of a comfortable radius takes the tap without changing
+     * how anything looks. It sits below the visible dot so the dot stays crisp.
+     */
+    map.addLayer({
+      id: 'stations-hit',
+      type: 'circle',
+      source: 'stations',
+      minzoom: 12,
+      paint: {'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 16], 'circle-opacity': 0}
+    }, 'stations-layer')
+    map.on('click', 'stations-hit', (e: MapLayerMouseEvent) => {
+      markMapTapHandled()
       const props = e.features?.[0]?.properties
       const id = props?.id
       const name = props?.name
@@ -691,8 +725,8 @@ async function loadNetworkLayers() {
       // no name lookup. Without one there is nothing useful to show.
       if (id && name) void showStop(String(id), String(name))
     })
-    map.on('mouseenter', 'stations-layer', () => { map.getCanvas().style.cursor = 'pointer' })
-    map.on('mouseleave', 'stations-layer', () => { map.getCanvas().style.cursor = '' })
+    map.on('mouseenter', 'stations-hit', () => { map.getCanvas().style.cursor = 'pointer' })
+    map.on('mouseleave', 'stations-hit', () => { map.getCanvas().style.cursor = '' })
   } catch (err) {
     logError(`stations.json unavailable (station dots hidden): ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -739,8 +773,20 @@ const urlFor = (t: DetailTarget | null): string => {
 }
 
 /** Open a target and push it onto history, so Back closes it. */
+/**
+ * How many of our panels are stacked in history.
+ *
+ * Kept IN the history state rather than in a variable, because `popstate` does not
+ * say which way the user went — reading the depth back off the entry is the only
+ * reliable answer. It decides whether Back is offered, and lets Close unwind the
+ * whole stack in one press.
+ */
+let navDepth = 0
+const depthOf = (): number => (history.state as {depth?: number} | null)?.depth ?? 0
+
 function navigate(t: DetailTarget): void {
-  history.pushState({detail: t}, '', urlFor(t))
+  navDepth = depthOf() + 1
+  history.pushState({detail: t, depth: navDepth}, '', urlFor(t))
   void applyTarget(t)
 }
 
@@ -754,7 +800,10 @@ function navigate(t: DetailTarget): void {
  * would take them off the site.
  */
 function closeDetail(): void {
-  if ((history.state as {detail?: unknown} | null)?.detail) history.back()
+  const depth = depthOf()
+  // Unwind every entry we pushed, in one go: someone three panels deep wants the
+  // map back, not three presses of Back.
+  if (depth > 0) history.go(-depth)
   else {
     history.replaceState(null, '', urlFor(null))
     clearDetail()
@@ -768,11 +817,15 @@ function clearDetail(): void {
   detailJourney = null
   detailStrip = null
   detailBoard = []
+  navDepth = 0
+  followSelected = false
+  setSelectedVehicle(null)
   panel.hide()
   setFocusRoute(null)
   setFocusStop(null)
 }
 panel.onClose = () => closeDetail()
+panel.onBack = () => history.back()
 
 const showVehicle = (id: string): void => navigate({kind: 'vehicle', id})
 const showStop = (id: string, name: string): void =>
@@ -793,7 +846,7 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
   if (t.kind === 'vehicle') {
     const v = vehicles.find(x => x.id === t.id || shortId(x.id) === shortId(t.id))
     if (!v) {
-      panel.show({title: 'Vehicle', subtitle: 'not running now', body: noticeBody(
+      panel.show({title: 'Vehicle', subtitle: 'not running now', canGoBack: depthOf() > 1, body: noticeBody(
         'That vehicle is not on the map any more. Journeys end, and a link to one only lasts as long as the journey.', 'empty')})
       return
     }
@@ -805,8 +858,10 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
       subtitle: v.direction ? `to ${v.direction}` : undefined,
       accent: bg,
       accentText: textOn(bg),
+      canGoBack: depthOf() > 1,
       body: noticeBody('Loading the route…', 'loading')
     })
+    setSelectedVehicle(v.id)
     try {
       const detail = await fetchJourneyDetail(v.id, signal)
       if (signal.aborted) return
@@ -814,7 +869,11 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
       renderVehicleDetail()?.scrollToVehicle()
       setFocusRoute(detail?.path ?? null)
       setFocusStop(null)
-      keepClearOfPanel([v.lon, v.lat])
+      // Glide there once, then follow. Snapping straight into follow mode makes the
+      // opening feel like a fault rather than a move.
+      const drawn = animStates.get(v.id)?.renderPos
+      centreOnVisible(drawn ? [drawn[1], drawn[0]] : [v.lon, v.lat], 600)
+      setTimeout(() => { if (detailTarget?.kind === 'vehicle') followSelected = true }, 650)
     } catch (err) {
       if (signal.aborted) return
       panel.updateBody(noticeBody('Could not load the route just now.', 'error'))
@@ -828,9 +887,12 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
     subtitle: 'departures',
     accent: '#37474f',
     accentText: '#ffffff',
+    canGoBack: depthOf() > 1,
     body: noticeBody('Loading departures…', 'loading')
   })
+  setSelectedVehicle(null)
   setFocusRoute(null)
+  followSelected = false
   const at = stationIndex.get(t.id)
   setFocusStop(at ?? null)
   if (at) {
@@ -866,7 +928,15 @@ function renderVehicleDetail(): VehicleView | null {
   const t = detailTarget
   if (t?.kind !== 'vehicle') return null
   const v = vehicles.find(x => x.id === t.id)
-  if (!v) return null
+  if (!v) {
+    // The journey ended, or the vehicle left the box, while its panel was open.
+    // Saying so beats leaving times on screen that have stopped meaning anything.
+    panel.updateBody(noticeBody('This journey has finished, so there is nothing left to follow.', 'empty'))
+    setSelectedVehicle(null)
+    setFocusRoute(null)
+    detailStrip = null
+    return null
+  }
   const stops = detailJourney?.stops ?? []
   const target = markProgress(stops, v.fromStop?.name, v.toStop?.name)
   detailStrip = vehicleView(v, detailJourney, target, {
@@ -917,6 +987,79 @@ function keepClearOfPanel(lngLat: [number, number]): void {
   }
   if (dx === 0 && dy === 0) return
   map.panBy([dx, dy], {duration: 400})
+}
+
+/** The vehicle whose panel is open, so its badge can be picked out on the map. */
+let selectedVehicleId: string | null = null
+
+/**
+ * While a vehicle's panel is open, hold the vehicle still and move the MAP.
+ *
+ * Watching a badge crawl towards the edge and then off it is the wrong way round:
+ * the subject is the vehicle, so the city should slide past it.
+ *
+ * Centred on the VISIBLE map, not the container: the panel covers a 380 px column
+ * on a wide window and everything below ~150 px on a phone, so the container
+ * centre would park the vehicle underneath the panel.
+ *
+ * A drag or a pinch releases it. Following that ignored the user would make the
+ * map impossible to look around while a panel was open, which is worse than the
+ * problem it solves.
+ */
+let followSelected = false
+
+/** Pixel offset from the container centre to the centre of the uncovered map. */
+function visibleCentreOffset(): [number, number] {
+  const box = panel.occupies
+  if (!box) return [0, 0]
+  if (Panel.isCompact) {
+    // sheet along the bottom: the map that is left runs from the top to box.top
+    return [0, box.top / 2 - innerHeight / 2]
+  }
+  // column down the left: the map that is left runs from box.right to the edge
+  return [(box.right + innerWidth) / 2 - innerWidth / 2, 0]
+}
+
+/** Put `lngLat` in the middle of the map you can actually see. */
+function centreOnVisible(lngLat: [number, number], duration = 0): void {
+  map.easeTo({center: lngLat, offset: visibleCentreOffset(), duration})
+}
+
+// A user gesture always wins. Programmatic moves carry no originalEvent, so this
+// does not fire on our own following.
+map.on('movestart', e => {
+  if ((e as {originalEvent?: unknown}).originalEvent) followSelected = false
+})
+
+/**
+ * Pick the selected vehicle out of the crowd.
+ *
+ * With ~700 badges on screen, "the one you tapped" is otherwise impossible to
+ * follow: it is the same size and colour as its neighbours and it keeps moving.
+ * So the chosen badge gets a ring and the rest fade back.
+ *
+ * Two rules about how, both learned the hard way:
+ *
+ * The ring and the size go through a CLASS, never `transform`. `.veh` IS the
+ * MapLibre marker element and MapLibre owns its transform inline for positioning,
+ * so a CSS transform is either ignored or breaks placement. Growing the box stays
+ * centred, because the marker is anchored with a percentage translate.
+ *
+ * The dimming goes through `Marker.setOpacity`, not CSS. MapLibre writes marker
+ * opacity INLINE on every update (it has an `opacityWhenCovered` feature), so a
+ * stylesheet rule simply loses — measured: the other badges stayed at opacity 1.
+ * Using the library's own setter is the supported way to say this.
+ */
+const DIM_OPACITY = '0.3'
+function setSelectedVehicle(id: string | null): void {
+  if (selectedVehicleId === id) return
+  selectedVehicleId = id
+  document.body.classList.toggle('has-selection', id !== null)
+  for (const [vid, m] of markers) {
+    const chosen = vid === id
+    m.getElement().classList.toggle('is-selected', chosen)
+    m.setOpacity(id === null || chosen ? undefined : DIM_OPACITY)
+  }
 }
 
 /** Move the strip marker to match the vehicle's progress on the map. */
@@ -1047,14 +1190,47 @@ searchResults.hidden = true
 searchBox.append(searchInput, searchResults)
 document.body.append(searchBox)
 
-/** Show only this line, by switching the Line filter to it. */
+/**
+ * Show only this line, and frame all of it.
+ *
+ * Narrowing the filter without moving the map leaves you looking at an empty
+ * street while the line you asked for runs somewhere off-screen. So fit every
+ * vehicle of it, with padding for whatever is on top of the map.
+ */
 function focusLine(hit: {line: string; product: Product; key: string}): void {
+  // A panel about some other vehicle or stop is stale now, and its vehicle may be
+  // about to be filtered off the map underneath it.
+  if (panel.isOpen) closeDetail()
   filters[hit.product] = true
   lineMode = 'custom'
   lineFilter = new Set([hit.key])
   rebuildTypes()
   rebuildLines()
   render()
+
+  const on = vehicles.filter(v => lineKey(v) === hit.key)
+  if (on.length === 0) return
+  // Room for the search box above, and for the panel if it is open.
+  const compact = Panel.isCompact
+  const box = panel.occupies
+  const padding = {
+    top: 70,
+    bottom: compact && box ? Math.round(innerHeight - box.top) + 20 : 40,
+    left: !compact && box ? Math.round(box.right) + 20 : 40,
+    right: 40
+  }
+  if (on.length === 1) {
+    map.easeTo({center: [on[0].lon, on[0].lat], zoom: Math.max(map.getZoom(), 13), duration: 700})
+    return
+  }
+  let west = 180, east = -180, south = 90, north = -90
+  for (const v of on) {
+    west = Math.min(west, v.lon); east = Math.max(east, v.lon)
+    south = Math.min(south, v.lat); north = Math.max(north, v.lat)
+  }
+  // maxZoom matters: two vehicles a street apart would otherwise fill the screen
+  // with one block and no sense of the line.
+  map.fitBounds([[west, south], [east, north]], {padding, maxZoom: 14, duration: 700})
 }
 
 function closeSearch(): void {
@@ -1122,8 +1298,32 @@ searchInput.onkeydown = e => {
     first?.click()
   }
 }
-// tapping the map dismisses the list, like any other overlay
-map.on('click', closeSearch)
+/*
+ * Tapping the map puts the map back in charge: the search list closes, and so does
+ * the panel. A sheet covering most of a phone screen needs a way out that is not a
+ * 44 px button in the corner.
+ *
+ * But a tap on a station dot must open its board, not dismiss — and MapLibre fires
+ * BOTH the layer handler and the general one for the same tap, in an order that is
+ * not guaranteed.
+ *
+ * The first attempt asked `queryRenderedFeatures` whether the tap had hit
+ * anything. That failed in practice: station hit circles are 10-16 px and Berlin's
+ * stations are dense, so a probe at four unrelated points found station features at
+ * every one of them, and the panel could never be dismissed. So the layer handlers
+ * simply declare that they dealt with it, and the dismissal waits a tick to hear
+ * that — which works whichever order the two handlers run in.
+ */
+let mapTapHandled = false
+const markMapTapHandled = (): void => { mapTapHandled = true }
+
+map.on('click', () => {
+  closeSearch()
+  setTimeout(() => {
+    if (!mapTapHandled && panel.isOpen) closeDetail()
+    mapTapHandled = false
+  }, 0)
+})
 
 // --- polling with client-side backoff ---
 let nextDelay = POLL_INTERVAL_MS
@@ -1495,15 +1695,20 @@ rebuildTypes()
 rebuildLines()
 
 /** A checkbox that shows or hides one map layer, appended to `parent`. */
-const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLElement) => {
+const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLElement, also: string[] = []) => {
   const label = document.createElement('label')
   label.className = 'layer'
   const cb = document.createElement('input')
   cb.type = 'checkbox'
   cb.checked = on
   const apply = () => {
-    if (!map.getLayer(layerId)) return // layers load async
-    map.setLayoutProperty(layerId, 'visibility', cb.checked ? 'visible' : 'none')
+    // `also` carries layers that belong to the same thing — the invisible circle
+    // that takes taps for the station dots must hide with them, or an unticked
+    // Stations layer would still swallow clicks.
+    for (const id of [layerId, ...also]) {
+      if (!map.getLayer(id)) continue // layers load async
+      map.setLayoutProperty(id, 'visibility', cb.checked ? 'visible' : 'none')
+    }
   }
   cb.onchange = apply
   map.on('idle', apply) // re-assert once the layer exists
@@ -1512,7 +1717,7 @@ const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLEle
   return cb
 }
 toggleLayer('routes-layer', 'Routes', true, filterEl)
-toggleLayer('stations-layer', 'Stations', true, filterEl)
+toggleLayer('stations-layer', 'Stations', true, filterEl, ['stations-hit'])
 
 // --- one Debug switch for the whole test overlay ---
 // Four separate switches were confusing, and the network layers had none at all

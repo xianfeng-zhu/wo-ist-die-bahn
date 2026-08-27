@@ -380,3 +380,39 @@ body.debug .maplibregl-popup-content .pid {
   #statusbar { top: 54px; }
   body.detail-open #search { display: none; }
 }
+
+/* Back and close. Both are 44 px, the size a thumb needs, on both layouts. */
+#detail .detail-back {
+  flex: none; width: 44px; height: 44px; margin: -8px 0 0 -8px;
+  border: 0; background: transparent; color: inherit;
+  font: 400 30px/1 system-ui; cursor: pointer; border-radius: 50%;
+}
+#detail .detail-back:hover { background: rgba(255,255,255,.18); }
+
+/*
+ * The selected vehicle.
+ *
+ * With ~700 badges on screen, the one you tapped is otherwise impossible to
+ * follow: same size, same colour, and it keeps moving. So ring it and fade the
+ * rest back — the ring rather than a colour change, because the colour IS the
+ * line and changing it would lie.
+ *
+ * Size changes go through width/height and box-shadow, NEVER transform: `.veh` is
+ * the MapLibre marker element and MapLibre owns its transform inline for
+ * positioning. Growing the box stays centred, because the marker is anchored with
+ * a percentage translate.
+ */
+/* The dimming itself is set through Marker.setOpacity in main.ts — MapLibre writes
+   marker opacity inline, so a rule here would lose. */
+body.has-selection .veh.is-selected {
+  opacity: 1; z-index: 3;
+  border-color: #fff;
+  box-shadow: 0 0 0 3px #1565c0, 0 0 0 7px rgba(21,101,192,.28), 0 2px 8px rgba(0,0,0,.5);
+}
+/* Zoomed out the badge is an 11 px dot, so give the chosen one room to read. */
+body.dense.has-selection .veh.is-selected {
+  width: 17px; height: 17px; border-width: 2.5px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .veh { transition: opacity .18s ease-out, box-shadow .18s ease-out; }
+}
