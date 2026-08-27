@@ -141,3 +141,14 @@ Follow-up round, after using it:
 - Picking a line from search frames every vehicle of that line.
 - Tapping the map dismisses the panel; tapping a station opens its board instead.
 - Back and Close are both on the panel, on both layouts.
+
+Second follow-up, after using it again:
+
+- Following was too heavy. Recentring on every frame kept the vehicle still but
+  slid the whole city the entire time a panel was open. The map now holds still
+  and moves once, when the vehicle is about to leave the part of the map you can
+  see. Measured: no movement at all for 15 s, then one 700 ms glide.
+- A departure board now fetches again every 30 s and swaps the new times in
+  without a loading message, without losing your place in the list, and without
+  moving the map. Before this it went through the full panel rebuild once a
+  minute, which did all three.

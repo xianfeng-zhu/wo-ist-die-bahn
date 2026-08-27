@@ -498,10 +498,10 @@ function frame(rafNow: number) {
       // still short of the computed position => the limiter is correcting
       s.correcting = metresBetween(s.renderPos, target) > 1e-9
       m.setLngLat([s.renderPos[1], s.renderPos[0]])
-      // Follow on the DRAWN position, not the reported one, so the map moves as
-      // smoothly as the badge does.
+      // Follow on the DRAWN position, not the reported one, so the map recentres
+      // on the badge you can see rather than the one the feed reported.
       if (followSelected && id === selectedVehicleId) {
-        centreOnVisible([s.renderPos[1], s.renderPos[0]])
+        keepVehicleInView([s.renderPos[1], s.renderPos[0]])
       }
     }
     if (recorder) {
@@ -993,14 +993,20 @@ function keepClearOfPanel(lngLat: [number, number]): void {
 let selectedVehicleId: string | null = null
 
 /**
- * While a vehicle's panel is open, hold the vehicle still and move the MAP.
+ * While a vehicle's panel is open, keep the vehicle on screen.
  *
- * Watching a badge crawl towards the edge and then off it is the wrong way round:
- * the subject is the vehicle, so the city should slide past it.
+ * The map does NOT move with the vehicle. Recentring on every frame worked, but it
+ * felt heavy: the whole city crawled sideways the entire time a panel was open,
+ * and nothing around the vehicle ever held still long enough to read.
  *
- * Centred on the VISIBLE map, not the container: the panel covers a 380 px column
- * on a wide window and everything below ~150 px on a phone, so the container
- * centre would park the vehicle underneath the panel.
+ * So the vehicle is left to move, and the map only follows when the vehicle is
+ * about to leave the part of the map you can see. Then it glides once, putting the
+ * vehicle back in the middle, and goes quiet again. The result is a still map most
+ * of the time and one deliberate move now and then.
+ *
+ * "The part you can see" is the map MINUS the panel: a 380 px column on a wide
+ * window, everything below ~150 px on a phone. The container centre would park the
+ * vehicle underneath the panel.
  *
  * A drag or a pinch releases it. Following that ignored the user would make the
  * map impossible to look around while a panel was open, which is worse than the
@@ -1008,21 +1014,51 @@ let selectedVehicleId: string | null = null
  */
 let followSelected = false
 
+/** How near an edge the vehicle may get before the map moves. */
+const KEEP_IN_MARGIN_PX = 72
+/** Length of the one catch-up glide. Long enough to read as a move, not a jump. */
+const RECENTRE_MS = 700
+/** True while our own catch-up glide is running, so it is not restarted mid-flight. */
+let recentring = false
+
+/** The map you can actually see: the container minus whatever the panel covers. */
+function visibleRect(): {left: number; top: number; right: number; bottom: number} {
+  const full = {left: 0, top: 0, right: innerWidth, bottom: innerHeight}
+  const box = panel.occupies
+  if (!box) return full
+  // sheet along the bottom vs column down the left
+  return Panel.isCompact ? {...full, bottom: box.top} : {...full, left: box.right}
+}
+
 /** Pixel offset from the container centre to the centre of the uncovered map. */
 function visibleCentreOffset(): [number, number] {
-  const box = panel.occupies
-  if (!box) return [0, 0]
-  if (Panel.isCompact) {
-    // sheet along the bottom: the map that is left runs from the top to box.top
-    return [0, box.top / 2 - innerHeight / 2]
-  }
-  // column down the left: the map that is left runs from box.right to the edge
-  return [(box.right + innerWidth) / 2 - innerWidth / 2, 0]
+  const r = visibleRect()
+  return [(r.left + r.right) / 2 - innerWidth / 2, (r.top + r.bottom) / 2 - innerHeight / 2]
 }
 
 /** Put `lngLat` in the middle of the map you can actually see. */
 function centreOnVisible(lngLat: [number, number], duration = 0): void {
   map.easeTo({center: lngLat, offset: visibleCentreOffset(), duration})
+}
+
+/**
+ * Recentre only when `lngLat` is close to leaving the visible map.
+ *
+ * The margin is capped against the box, because on a phone the uncovered strip can
+ * be shorter than twice the margin — with a fixed 72 px there the test would never
+ * pass and the map would glide without end.
+ */
+function keepVehicleInView(lngLat: [number, number]): void {
+  if (recentring) return
+  const r = visibleRect()
+  const m = Math.min(KEEP_IN_MARGIN_PX, (r.right - r.left) / 4, (r.bottom - r.top) / 4)
+  const p = map.project(lngLat)
+  const inside = p.x > r.left + m && p.x < r.right - m && p.y > r.top + m && p.y < r.bottom - m
+  if (inside) return
+  recentring = true
+  // A user gesture during the glide fires moveend too, and releases follow itself.
+  map.once('moveend', () => { recentring = false })
+  centreOnVisible(lngLat, RECENTRE_MS)
 }
 
 // A user gesture always wins. Programmatic moves carry no originalEvent, so this
@@ -1151,16 +1187,57 @@ let urlApplied = false
 /*
  * Keep the open panel current.
  *
- * A vehicle panel re-renders on every poll — the delay changes, and the stop it
- * is approaching moves along the strip — but the stop list itself does not, so
- * there is no second request. A board re-renders every 5 s to tick its countdowns
- * down from times it already has, and refetches once a minute for new departures.
+ * A vehicle panel re-renders on every poll — the delay changes, and the stop it is
+ * approaching moves along the strip — but the stop list itself does not, so there
+ * is no second request.
+ *
+ * A board has two clocks. Every 5 s it re-renders to tick its countdowns down from
+ * times it already holds. Every 30 s it fetches the board again, because a delay
+ * that grows, a cancellation, or a departure due later than the last look are all
+ * new facts that no amount of counting down can produce.
  */
+const BOARD_REFETCH_MS = 30000
+let boardRefetching = false
+
+/**
+ * Fetch the open board again and swap in the new times, quietly.
+ *
+ * Quietly is the point, and it is why this is not `applyTarget`. That call rebuilds
+ * the whole panel: it shows "Loading departures…" over a board you were reading, it
+ * throws the scroll position back to the top, and it eases the map to the stop
+ * again. Doing that every 30 s makes a live board unusable. `panel.updateBody`
+ * keeps the header and the scroll position, so the only thing that changes is the
+ * times.
+ *
+ * A failed refetch leaves the old board on screen. Stale times that keep counting
+ * down are more use to someone waiting than an error page, and the next try is
+ * 30 s away.
+ */
+async function refetchBoard(): Promise<void> {
+  const t = detailTarget
+  if (t?.kind !== 'stop' || boardRefetching) return
+  const signal = detailAbort?.signal
+  boardRefetching = true
+  try {
+    const board = await fetchStationBoard(t.id, 60, 30, signal)
+    // the user may have moved on while this was in the air
+    if (signal?.aborted || detailTarget?.kind !== 'stop' || detailTarget.id !== t.id) return
+    detailBoard = board
+    detailFetchedAt = Date.now()
+    renderStopDetail()
+  } catch (err) {
+    if (signal?.aborted) return
+    logError(`station board refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    boardRefetching = false
+  }
+}
+
 function refreshDetail(): void {
   if (detailTarget?.kind === 'vehicle') renderVehicleDetail()
   else if (detailTarget?.kind === 'stop') {
-    if (Date.now() - detailFetchedAt > 60000) void applyTarget(detailTarget)
-    else renderStopDetail()
+    renderStopDetail()
+    if (Date.now() - detailFetchedAt > BOARD_REFETCH_MS) void refetchBoard()
   }
 }
 setInterval(() => { if (panel.isOpen) refreshDetail() }, 5000)
@@ -1395,7 +1472,12 @@ void poll()
 // `schedule` replaces the pending timer instead of adding one, so this can never
 // leave two poll loops running side by side.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && Date.now() - lastUpdate > POLL_INTERVAL_MS) schedule(0)
+  if (document.hidden) return
+  if (Date.now() - lastUpdate > POLL_INTERVAL_MS) schedule(0)
+  // A hidden tab has its timers throttled to about one a minute, so an open panel
+  // can come back showing countdowns a minute out of date. Put it right at once,
+  // rather than leaving the wrong number on screen for another 5 s.
+  if (panel.isOpen) refreshDetail()
 })
 
 // --- mode filters + layer toggles ---
