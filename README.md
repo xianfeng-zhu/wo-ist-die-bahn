@@ -104,14 +104,29 @@ two numbers: leave at minute X, arrive at minute Y. The rounding alone is ±30
 seconds, which at tram speed is ±200 m, before the real vehicle's own accelerating
 and waiting at red lights.
 
-**What that means in practice.** The map is dependable at stops, and the delay
-figures are real. Mid-segment, expect the dot to be a block or two from the
-vehicle you can see. Each popup says so.
+**It gets worse the less often a mode stops**, because the interpolation has
+further to stretch. Metres covered per scheduled minute, and what ±30 s of
+rounding is worth:
 
-**What is not the cause.** Measured for M10 and tram 12 over 259 s: the drawn
-position tracks the reported one to a median of 3 m, and the forecast sits a
-median 2.8 m from the chosen track across 145 live trams. The app follows the
-right street; it cannot know how far along it the tram really is.
+| Mode | Stop gap | Per minute | Rounding alone |
+|---|---|---|---|
+| Tram | 2 min | 286 m | ±143 m |
+| Bus | 1 min | 316 m | ±158 m |
+| U-Bahn | 2 min | 400 m | ±200 m |
+| S-Bahn | 2 min | 603 m | ±301 m |
+| Regional | 10 min | 1,077 m | ±539 m |
+| ICE / IC | 67 min | 1,849 m | ±924 m |
+
+**What that means in practice.** The map is dependable at stops, and the delay
+figures are real. Mid-segment, expect a tram or bus to be a block or two from
+where you can see it, and a long-distance train to be kilometres out. Each popup
+says the position is estimated.
+
+**What is not the cause.** The app's own error is small. Measured live per mode,
+comparing the position drawn against the operator's position the moment a poll
+lands: bus median 1.4 m, U-Bahn 2.9 m, S-Bahn 3.6 m, tram 3.8 m. The forecast
+sits a median 2.5–3.7 m from the track the app picks. It follows the right
+street; it cannot know how far along it the vehicle really is.
 
 ## Checking vehicle movement
 
