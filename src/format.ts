@@ -4,18 +4,33 @@
 // 1,762 of 1,762 strings checked, scheduled and realtime alike. So seconds are
 // noise: never show them, and never imply precision the data does not have.
 
-/** `HHMMSS` or `HH:MM:SS` -> seconds since midnight. `null` if unreadable. */
+/**
+ * A HAFAS time string -> seconds from the start of its day of operation.
+ *
+ * The wire format is `[[d]d]HHMMSS`, and the optional leading day offset is not
+ * theoretical: querying a departure board at 00:01 returns `01000100` for a
+ * 00:01 departure, because a transit day of operation runs past midnight. Read as
+ * six digits that is 01:00:01 — an hour wrong, and sorting a board by it puts the
+ * departures in the wrong order. Found against the live feed; fixtures alone
+ * would never have shown it.
+ *
+ * The offset is kept in the result (`+ days * 86400`) rather than discarded, so
+ * arithmetic stays correct across the boundary. `clockTime` and `minutesUntil`
+ * both fold it back.
+ */
 export function timeToSeconds(t: string | undefined): number | null {
   if (!t) return null
   const digits = t.replace(/:/g, '')
-  if (!/^\d{4,6}$/.test(digits)) return null
-  const padded = digits.padStart(6, '0')
-  const h = Number(padded.slice(0, 2))
-  const m = Number(padded.slice(2, 4))
-  const s = Number(padded.slice(4, 6))
+  if (!/^\d{4,8}$/.test(digits)) return null
+  // the last six digits are the time; anything before them is a day offset
+  const timePart = digits.length > 6 ? digits.slice(-6) : digits.padStart(6, '0')
+  const days = digits.length > 6 ? Number(digits.slice(0, -6)) : 0
+  const h = Number(timePart.slice(0, 2))
+  const m = Number(timePart.slice(2, 4))
+  const s = Number(timePart.slice(4, 6))
   if (m > 59 || s > 59) return null
-  // HAFAS uses 24+ for times past midnight on the same day of operation
-  return h * 3600 + m * 60 + s
+  // HAFAS also uses 24+ hours for the same day of operation
+  return days * 86400 + h * 3600 + m * 60 + s
 }
 
 /** `HHMMSS` -> `HH:MM`, wrapping HAFAS's 24+ hours back into a clock reading. */
@@ -38,8 +53,10 @@ export function minutesUntil(t: string | undefined, nowSec: number): number | nu
   const target = timeToSeconds(t)
   if (target === null) return null
   let diff = target - nowSec
-  if (diff < -3 * 3600) diff += 24 * 3600
-  if (diff > 21 * 3600) diff -= 24 * 3600
+  // Fold whole days first: a day-offset string can be 24 h ahead of the clock and
+  // still mean "in one minute" (see timeToSeconds).
+  while (diff > 21 * 3600) diff -= 24 * 3600
+  while (diff < -3 * 3600) diff += 24 * 3600
   return Math.round(diff / 60)
 }
 

@@ -1,4 +1,5 @@
 import {Journey, transformJourney, Vehicle} from './vehicle.js'
+import {parseJourneyDetail, parseStationBoard, type Departure, type JourneyDetail} from './journey.js'
 
 export const GATE_URL = 'https://fahrinfo.vbb.de/gate'
 
@@ -166,4 +167,54 @@ export async function fetchAllVehicles(bbox: BBox, maxJny = 2000, signal?: Abort
     vehicles: [...byId.values()],
     capped: PRODUCT_GROUPS.filter((_, i) => pages[i].journeys >= JNY_CAP)
   }
+}
+
+/**
+ * One journey's full stop list and route shape, for a vehicle the user tapped.
+ *
+ * `getPasslist` is what turns the 4-stopover summary into every stop; `getPolyline`
+ * returns the route as HAFAS draws it, so the map can highlight it without any
+ * GTFS geometry (which we ship for rail only).
+ *
+ * This is an ON-DEMAND call: one request for one tap. Do not batch it over the
+ * radar's results — that would be ~1,000 requests a poll.
+ */
+export async function fetchJourneyDetail(jid: string, signal?: AbortSignal): Promise<JourneyDetail | null> {
+  const json = await gate([{meth: 'JourneyDetails', req: {jid, getPasslist: true, getPolyline: true}}], signal)
+  return parseJourneyDetail(json)
+}
+
+/**
+ * A stop's departure board, for a station the user tapped.
+ *
+ * `extId` is the numeric HAFAS station id, shipped as `id` in stations.json — no
+ * name lookup needed. `dur` is the window in minutes.
+ */
+export async function fetchStationBoard(
+  extId: string, minutes = 60, maxJny = 30, signal?: AbortSignal
+): Promise<Departure[]> {
+  const {date, time} = berlinDateTime(new Date())
+  const json = await gate([{meth: 'StationBoard', req: {
+    type: 'DEP', date, time, stbLoc: {extId}, dur: minutes, maxJny,
+    jnyFltrL: [{type: 'PROD', mode: 'INC', value: ALL_PRODUCTS}]
+  }}], signal)
+  return parseStationBoard(json)
+}
+
+/** POST one or more HCI service requests to the gate. */
+async function gate(svcReqL: unknown[], signal?: AbortSignal): Promise<unknown> {
+  const res = await fetch(`${GATE_URL}?rnd=${Date.now()}`, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({
+      lang: 'de',
+      svcReqL,
+      client: {type: 'WEB', id: 'VBB', name: 'VBB WebApp', l: 'vs_webapp_vbb'},
+      ver: '1.45',
+      auth: {type: 'AID', aid: 'hafas-vbb-webapp'}
+    }),
+    signal
+  })
+  if (!res.ok) throw new Error(`HAFAS HTTP ${res.status}`)
+  return res.json()
 }
