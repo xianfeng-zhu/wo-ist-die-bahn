@@ -162,14 +162,57 @@ try {
   await Promise.all([parseShapes(), parseStopTimes()])
   console.log(`rail stops (stop_id): ${railStopIds.size}`)
 
-  // ---- stops.txt: stop_id -> {name, lat, lon} ----
+  // ---- stops.txt: stop_id -> {name, lat, lon, extId} ----
+  //
+  // Read the columns by NAME here, not by position: this block now needs
+  // parent_station, which sits at a different index in different GTFS profiles,
+  // and a silent off-by-one would attach the wrong id to every station.
   const stopsText = readFileSync(path.join(GTFS, 'stops.txt'), 'utf8')
-  const stopById = new Map()
-  for (const s of parseCsv(stopsText).slice(1)) {
-    if (!railStopIds.has(s[0])) continue
-    stopById.set(s[0], {name: s[2], lat: Number(s[4]), lon: Number(s[5])})
+  const stopRows = parseCsv(stopsText)
+  const sh = stopRows[0].map(h => h.trim())
+  const col = name => {
+    const i = sh.indexOf(name)
+    if (i === -1) throw new Error(`stops.txt has no ${name} column: ${sh.join(',')}`)
+    return i
   }
-  console.log(`rail stops with coords: ${stopById.size}`)
+  const C = {
+    id: col('stop_id'), name: col('stop_name'), lat: col('stop_lat'), lon: col('stop_lon'),
+    parent: sh.indexOf('parent_station')
+  }
+  /*
+   * The id a departure board needs is the STATION, not the platform.
+   *
+   * stop_times references platform-level stops, so the raw ids are children.
+   * HAFAS identifies a station by its numeric `extId` (Alexanderplatz is
+   * 900100003, verified against StationBoard), which is the numeric run inside
+   * the GTFS id whatever prefix the feed uses. Take the parent where there is
+   * one, then reduce to that numeric form and collapse the platforms onto it, so
+   * one station is one dot with one usable id.
+   */
+  const extIdOf = id => /(\d{6,})/.exec(String(id))?.[1] ?? null
+  const allStops = new Map() // raw stop_id -> row
+  for (const r of stopRows.slice(1)) if (r[C.id]) allStops.set(r[C.id], r)
+  const stopById = new Map() // extId -> {name, lat, lon}
+  let noExtId = 0
+  for (const rawId of railStopIds) {
+    const row = allStops.get(rawId)
+    if (!row) continue
+    const parentId = C.parent !== -1 && row[C.parent] ? row[C.parent] : null
+    const station = (parentId && allStops.get(parentId)) || row
+    const extId = extIdOf(parentId ?? rawId) ?? extIdOf(rawId)
+    if (!extId) { noExtId++; continue }
+    // first writer wins, and a parent row beats a platform row
+    if (!stopById.has(extId) || parentId) {
+      stopById.set(extId, {
+        name: station[C.name],
+        lat: Number(station[C.lat]),
+        lon: Number(station[C.lon])
+      })
+    }
+  }
+  console.log(`rail stops: ${railStopIds.size} platform ids -> ${stopById.size} stations with an extId` +
+    (noExtId ? ` (${noExtId} had no numeric id and were dropped)` : ''))
+  if (stopById.size < 400) throw new Error(`only ${stopById.size} stations resolved — refusing to write`)
 
   // ---- inventory report: how many distinct variants per line, and at what cost? ----
   // Writes nothing. Payload size is the deciding constraint for shipping every
@@ -283,12 +326,14 @@ try {
   console.log(`route variants shipped: ${routeFeatures.length} (cap ${MAX_VARIANTS_PER_LINE} per line)`)
 
   // ---- stations.json: Point per rail stop ----
+  // `id` is the HAFAS extId, which is what StationBoard resolves a departure
+  // board by — so the app can offer a stop's departures with no lookup request.
   const stationFeatures = [...stopById.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([stopId, s]) => ({
+    .map(([extId, s]) => ({
       type: 'Feature',
       geometry: {type: 'Point', coordinates: [s.lon, s.lat]},
-      properties: {name: s.name}
+      properties: {name: s.name, id: extId}
     }))
 
   // ---- src/line-colors.ts: linienfarben CSV (';'-separated, latin1) ----
