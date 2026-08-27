@@ -20,7 +20,39 @@ const asset = (name: string): string => `${import.meta.env.BASE_URL}${name}`
 setWorkerUrl(asset('maplibre-gl-worker.mjs'))
 
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
-const POLL_INTERVAL_MS = 10000 // matches the official VBB livemap (Livemap.timeout = 10)
+/**
+ * Gap between polls.
+ *
+ * Each response carries a 30 s forecast (`ani.mSec` = 0/10/20/30 s), and the
+ * animation replays it against the wall clock, so the poll only has to come back
+ * before the forecast runs out. At 10 s — copied from the official VBB livemap,
+ * whose `Livemap.timeout` is 10 — the cycle was ~12 s with request time, so about
+ * 60% of every forecast was fetched and thrown away. That mattered once the app
+ * started fetching every mode: their livemap asks for the visible viewport, we ask
+ * for all of Berlin, so we had copied their cadence without their payload.
+ *
+ * 20 s gives a ~22 s cycle: still 8 s inside the forecast when the network is
+ * slow, and half the traffic (11 -> 6 MB a minute, 15 -> 8 requests a minute).
+ * The cost is that a revision to a delay estimate can be up to 10 s staler. That
+ * is affordable because most polls carry no revision at all — HAFAS's 30 s
+ * forecast matches the position it later calculates to a median 7 m for trams,
+ * with only 5.4% of samples over 50 m.
+ *
+ * Do not raise it past ~25 s. Beyond that the cycle overruns the forecast and
+ * vehicles start coasting on `COAST_GRACE_MS`, which is an outage cushion, not a
+ * normal operating mode.
+ */
+const POLL_INTERVAL_MS = 20000
+/**
+ * First retry after a failed poll, doubling per consecutive failure.
+ *
+ * Deliberately NOT a multiple of POLL_INTERVAL_MS. It used to be
+ * `POLL_INTERVAL_MS * 2 ** failures`, which at a 20 s interval would wait 40 s
+ * after a single hiccup — well past the forecast plus its grace, so every marker
+ * would freeze over one dropped request. Data is already stale when a poll fails,
+ * so the first retry should be sooner than a normal poll, not later.
+ */
+const RETRY_BASE_MS = 5000
 const MAX_BACKOFF_MS = 60000
 
 /**
@@ -628,7 +660,7 @@ async function poll() {
    * Nothing is drawn in a hidden tab, so nothing needs fetching.
    *
    * With every mode on, a poll moves about 2.2 MB, so a forgotten background tab
-   * would pull roughly 13 MB a minute for no viewer. The animation loop already
+   * would pull roughly 6 MB a minute for no viewer. The animation loop already
    * stops on its own — the browser does not run rAF in a hidden tab — so this is
    * the other half of the same idea. Becoming visible polls at once, and until it
    * answers the status bar says how old the data is.
@@ -666,7 +698,7 @@ async function poll() {
     // one hiccup is stale data, not an outage; say so honestly
     conn = failures >= 3 ? 'offline' : 'stale'
     logError(`poll failed (${failures}x): ${err instanceof Error ? err.message : String(err)}`)
-    nextDelay = Math.min(POLL_INTERVAL_MS * 2 ** failures, MAX_BACKOFF_MS)
+    nextDelay = Math.min(RETRY_BASE_MS * 2 ** (failures - 1), MAX_BACKOFF_MS)
   } finally {
     clearTimeout(t)
     inFlight = false

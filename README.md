@@ -4,7 +4,7 @@ Live map of every Berlin transit vehicle: S-Bahn, U-Bahn, tram, bus, ferry,
 regional and long-distance trains. About 1,100 of them at once.
 
 A static web app. There is no backend: the browser polls VBB's live endpoint
-directly every 10 seconds, and moves each vehicle in between using the operator's
+directly every 20 seconds, and moves each vehicle in between using the operator's
 own short-term forecast. Nothing about the motion is invented from a timetable.
 
 S-Bahn, U-Bahn and trams follow their real GTFS track. The other modes follow the
@@ -77,9 +77,15 @@ accepting that access can be withdrawn.
 
 **Every mode costs bandwidth.** Showing all of them takes three requests per
 poll — the gate caps one response at 1,000 journeys, and Berlin runs more
-vehicles than that — which is about **2.2 MB every 10 seconds**, or 13 MB a
-minute per open tab. Polling stops while the tab is hidden. If that is too much
-for your deployment, the levers are: raise `POLL_INTERVAL_MS`, drop a mask from
+vehicles than that — which is about **2.2 MB every 20 seconds**, or 6 MB a minute
+per open tab. Polling stops while the tab is hidden.
+
+The interval is 20 s rather than 10 because each response already contains a 30
+second forecast, and the animation replays it against the wall clock; the poll
+only has to return before that forecast runs out. Measured cycle is 21 s, with no
+vehicle ever reaching the end of its forecast. Do not raise it past about 25 s.
+
+If 6 MB a minute is still too much, the other levers are: drop a mask from
 `PRODUCT_GROUPS` in `src/hci.ts`, or fetch the visible viewport instead of all of
 Berlin (`BERLIN_BBOX` in `src/main.ts`).
 
