@@ -12,9 +12,14 @@ describe('productFromCls', () => {
     expect(productFromCls(32)).toBe('express')
     expect(productFromCls(64)).toBe('regional')
   })
+  it('maps bit 7 to bus, per VBB\'s own bitmask table', () => {
+    // OpenDataVBB/API products.txt calls it "Bus requiring surcharge"
+    expect(productFromCls(128)).toBe('bus')
+  })
   it('returns null for a bit it does not know', () => {
-    // bits 7-9 are accepted by the gate but return nothing in Berlin
-    expect(productFromCls(128)).toBeNull()
+    // bits 8 and 9 are accepted by the gate but are in no VBB table
+    expect(productFromCls(256)).toBeNull()
+    expect(productFromCls(512)).toBeNull()
     expect(productFromCls(undefined)).toBeNull()
   })
 })
@@ -248,7 +253,7 @@ describe('line-name product gate', () => {
     }
   })
   it('drops a cls it does not map, rather than guessing a mode', () => {
-    expect(transformJourney(mk('X', 128) as never, commonFor([{name: 'X', cls: 128}]), '23:00:00')).toBeNull()
+    expect(transformJourney(mk('X', 256) as never, commonFor([{name: 'X', cls: 256}]), '23:00:00')).toBeNull()
     expect(transformJourney(mk('Y', undefined as never) as never, commonFor([{name: 'Y'}]), '23:00:00')).toBeNull()
   })
 })

@@ -11,8 +11,14 @@ import {decodePolyline} from './polyline.js'
  *   bit 4  cls 16  `Fähre`  ferry          1 line
  *   bit 5  cls 32  `ICE`/`IC`  long distance  3 trains
  *   bit 6  cls 64  `RE`/`RB`   regional      17 lines
+ *   bit 7  cls 128 surcharge bus  nothing in Berlin
  *
- * Bits 7-9 are accepted by the gate but return nothing in the Berlin box.
+ * Bit 7 is VBB's "Bus requiring surcharge" (on-demand and supplement services),
+ * named in their own bitmask table at OpenDataVBB/API `products.txt`, which
+ * confirms bits 0-6 exactly as measured. It returns nothing inside the Berlin box
+ * — those services are rural — but it is mapped rather than dropped so one does
+ * not vanish if it ever appears. Bits 8 and 9 are accepted by the gate and are
+ * not in VBB's table at all.
  */
 export type Product = 'suburban' | 'subway' | 'tram' | 'bus' | 'ferry' | 'express' | 'regional'
 
@@ -60,7 +66,8 @@ export interface Vehicle {
 }
 
 export const PRODUCT_BY_CLS: Record<number, Product> = {
-  1: 'suburban', 2: 'subway', 4: 'tram', 8: 'bus', 16: 'ferry', 32: 'express', 64: 'regional'
+  1: 'suburban', 2: 'subway', 4: 'tram', 8: 'bus', 16: 'ferry', 32: 'express', 64: 'regional',
+  128: 'bus' // "Bus requiring surcharge" per VBB's own table; shown as a plain bus
 }
 
 /**
