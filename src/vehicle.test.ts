@@ -1,14 +1,21 @@
 import {describe, expect, it} from 'vitest'
-import type {LineSighting, Product} from './vehicle.js'
-import {compareLineNames, delayFrom, filterVehicles, productFromCls, recordLineSightings, shortId, transformJourney} from './vehicle.js'
+import type {Filters, LineRef, LineSighting, Product} from './vehicle.js'
+import {compareLineNames, delayFrom, filterVehicles, lineKey, productFromCls, recordLineSightings, shortId, transformJourney} from './vehicle.js'
 
 describe('productFromCls', () => {
-  it('maps HAFAS cls bitmask to rail products', () => {
+  it('maps every HAFAS cls bit the gate returns', () => {
     expect(productFromCls(1)).toBe('suburban')
     expect(productFromCls(2)).toBe('subway')
     expect(productFromCls(4)).toBe('tram')
-    expect(productFromCls(8)).toBeNull() // bus
-    expect(productFromCls(64)).toBeNull() // regional
+    expect(productFromCls(8)).toBe('bus')
+    expect(productFromCls(16)).toBe('ferry')
+    expect(productFromCls(32)).toBe('express')
+    expect(productFromCls(64)).toBe('regional')
+  })
+  it('returns null for a bit it does not know', () => {
+    // bits 7-9 are accepted by the gate but return nothing in Berlin
+    expect(productFromCls(128)).toBeNull()
+    expect(productFromCls(undefined)).toBeNull()
   })
 })
 
@@ -139,8 +146,12 @@ describe('transformJourney', () => {
   it('returns null when pos is missing', () => {
     expect(transformJourney({...j, pos: null}, {locs, prods: [{name: 'S9', cls: 1}]}, '23:05:00')).toBeNull()
   })
-  it('returns null for non-rail cls', () => {
-    expect(transformJourney(j, {locs, prods: [{name: 'M29', cls: 8}]}, '23:05:00')).toBeNull()
+  it('keeps a bus, read the same way as rail', () => {
+    const v = transformJourney(j, {locs, prods: [{name: 'M29', cls: 8}]}, '23:05:00')!
+    expect(v.product).toBe('bus')
+    expect(v.line).toBe('M29')
+    expect(v.nextStop).toBe('S Treptower Park')
+    expect(v.delayMs).toBe(-60000)
   })
   it('picks the first upcoming stop as nextStop', () => {
     const v = transformJourney(j, {locs, prods: [{name: 'S9', cls: 1}]}, '23:03:30')!
@@ -170,26 +181,39 @@ describe('transformJourney', () => {
 })
 
 describe('filterVehicles', () => {
-  const v = (product: Product) => ({id: product, line: 'L', product, direction: 'd', lat: 1, lon: 2, nextStop: null, delayMs: null})
+  const ALL_ON: Filters = {suburban: true, subway: true, tram: true, bus: true, ferry: true, express: true, regional: true}
+  const v = (product: Product, line = 'L') =>
+    ({id: `${product}:${line}`, line, product, direction: 'd', lat: 1, lon: 2, nextStop: null, delayMs: null})
   it('keeps only enabled products', () => {
-    const out = filterVehicles([v('suburban'), v('subway'), v('tram')], {suburban: true, subway: false, tram: true})
+    const out = filterVehicles([v('suburban'), v('subway'), v('tram')], {...ALL_ON, subway: false})
     expect(out.map(x => x.product)).toEqual(['suburban', 'tram'])
   })
+  it('keeps every mode the feed returns, not just rail', () => {
+    const vs = [v('bus'), v('ferry'), v('express'), v('regional')]
+    expect(filterVehicles(vs, ALL_ON).length).toBe(4)
+  })
   it('keeps only the listed lines when a line filter is given', () => {
-    const vs = [v('tram'), v('subway')]
-    vs[0].line = 'M10'
-    vs[1].line = 'U8'
-    const out = filterVehicles(vs, {suburban: true, subway: true, tram: true}, new Set(['M10']))
+    const out = filterVehicles([v('tram', 'M10'), v('subway', 'U8')], ALL_ON, new Set(['tram:M10']))
     expect(out.map(x => x.line)).toEqual(['M10'])
+  })
+  it('tells a replacement bus apart from the line it replaces', () => {
+    // the live feed has a BUS called S9 and a BUS called U6; keyed on the name
+    // alone, picking one would show both
+    const vs = [v('suburban', 'S9'), v('bus', 'S9')]
+    expect(filterVehicles(vs, ALL_ON, new Set(['bus:S9'])).map(x => x.product)).toEqual(['bus'])
+    expect(filterVehicles(vs, ALL_ON, new Set(['suburban:S9'])).map(x => x.product)).toEqual(['suburban'])
   })
   it('keeps nothing when the line filter is an empty set', () => {
     // an empty selection matches nothing, mirroring the product filter, so the
     // UI's "All lines" box can tick and untick every line like "All types" does
-    const vs = [v('tram'), v('subway')]
-    vs[0].line = 'M10'
-    vs[1].line = 'U8'
-    const out = filterVehicles(vs, {suburban: true, subway: true, tram: true}, new Set())
+    const out = filterVehicles([v('tram', 'M10'), v('subway', 'U8')], ALL_ON, new Set())
     expect(out.length).toBe(0)
+  })
+})
+
+describe('lineKey', () => {
+  it('keys on mode and name together', () => {
+    expect(lineKey({product: 'bus', line: 'S9'})).not.toBe(lineKey({product: 'suburban', line: 'S9'}))
   })
 })
 
@@ -209,18 +233,30 @@ describe('line-name product gate', () => {
     expect(transformJourney(mk('FEX', 1) as never, commonFor([{name: 'FEX', cls: 1}]), '23:00:00')).toBeNull()
     expect(transformJourney(mk('RE1', 2) as never, commonFor([{name: 'RE1', cls: 2}]), '23:00:00')).toBeNull()
   })
+  it('applies NO name gate to the non-rail modes', () => {
+    // real names from the live feed: buses called after the rail line they
+    // replace, and long-distance trains named by number
+    for (const [name, cls, product] of [
+      ['S9', 8, 'bus'], ['U6', 8, 'bus'], ['X34', 8, 'bus'], ['893', 8, 'bus'],
+      ['F10', 16, 'ferry'], ['ICE 1130', 32, 'express'], ['IC 2275', 32, 'express'],
+      ['RE1', 64, 'regional'], ['FEX', 64, 'regional']
+    ] as const) {
+      const v = transformJourney(mk(name, cls) as never, commonFor([{name, cls}]), '23:00:00')
+      expect(v, name).not.toBeNull()
+      expect(v?.product).toBe(product)
+      expect(v?.line).toBe(name)
+    }
+  })
+  it('drops a cls it does not map, rather than guessing a mode', () => {
+    expect(transformJourney(mk('X', 128) as never, commonFor([{name: 'X', cls: 128}]), '23:00:00')).toBeNull()
+    expect(transformJourney(mk('Y', undefined as never) as never, commonFor([{name: 'Y'}]), '23:00:00')).toBeNull()
+  })
 })
 
-describe('test mode (strictName: false)', () => {
-  it('keeps FEX with an inferred product', () => {
-    const j = {jid: 'f1', prodX: 0, dirTxt: 'd', pos: {x: 13490000, y: 52460000}, stopL: []}
-    const v = transformJourney(j as never, {locs: [], prods: [{name: 'FEX', cls: 64}]}, '23:00:00', false)
-    expect(v).not.toBeNull()
-    expect(v?.line).toBe('FEX')
-  })
-  it('still drops vehicles without a position in test mode', () => {
-    const j = {jid: 'f1', prodX: 0, dirTxt: 'd', pos: null, stopL: []}
-    expect(transformJourney(j as never, {locs: [], prods: [{name: 'FEX', cls: 64}]}, '23:00:00', false)).toBeNull()
+describe('productFromCls covers every bit the gate returns', () => {
+  it('maps all seven', () => {
+    expect([1, 2, 4, 8, 16, 32, 64].map(productFromCls))
+      .toEqual(['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'])
   })
 })
 
@@ -249,54 +285,55 @@ describe('compareLineNames', () => {
 
 describe('recordLineSightings', () => {
   const LINGER = 60000
+  const B = (line: string, product: Product): LineRef => ({line, product})
   const seed = (): Map<string, LineSighting> => {
     const t = new Map<string, LineSighting>()
-    recordLineSightings(t, [['M10', 'tram'], ['U8', 'subway']], 1000, LINGER)
+    recordLineSightings(t, [B('M10', 'tram'), B('U8', 'subway')], 1000, LINGER)
     return t
   }
 
   it('reports a change the first time a line is seen', () => {
     const table = new Map<string, LineSighting>()
-    expect(recordLineSightings(table, [['M10', 'tram']], 1000, LINGER)).toBe(true)
-    expect([...table.keys()]).toEqual(['M10'])
+    expect(recordLineSightings(table, [B('M10', 'tram')], 1000, LINGER)).toBe(true)
+    expect([...table.keys()]).toEqual(['tram:M10'])
   })
 
   it('reports no change when the same lines are seen again', () => {
     const table = seed()
-    expect(recordLineSightings(table, [['M10', 'tram'], ['U8', 'subway']], 11000, LINGER)).toBe(false)
-    expect([...table.keys()]).toEqual(['M10', 'U8'])
+    expect(recordLineSightings(table, [B('M10', 'tram'), B('U8', 'subway')], 11000, LINGER)).toBe(false)
+    expect([...table.keys()]).toEqual(['tram:M10', 'subway:U8'])
   })
 
   it('keeps a line that one poll missed, so the menu does not jump', () => {
     const table = seed()
     // U8 absent, but only 10 s since it was last seen
-    expect(recordLineSightings(table, [['M10', 'tram']], 11000, LINGER)).toBe(false)
-    expect(table.has('U8')).toBe(true)
+    expect(recordLineSightings(table, [B('M10', 'tram')], 11000, LINGER)).toBe(false)
+    expect(table.has('subway:U8')).toBe(true)
   })
 
   it('drops a line that has been gone longer than the linger window', () => {
     const table = seed()
-    expect(recordLineSightings(table, [['M10', 'tram']], 1000 + LINGER + 1, LINGER)).toBe(true)
-    expect([...table.keys()]).toEqual(['M10'])
+    expect(recordLineSightings(table, [B('M10', 'tram')], 1000 + LINGER + 1, LINGER)).toBe(true)
+    expect([...table.keys()]).toEqual(['tram:M10'])
   })
 
   it('refreshes the sighting time, so a line running all day is never dropped', () => {
     const table = seed()
     for (let t = 11000; t < 600000; t += 10000) {
-      recordLineSightings(table, [['M10', 'tram'], ['U8', 'subway']], t, LINGER)
+      recordLineSightings(table, [B('M10', 'tram'), B('U8', 'subway')], t, LINGER)
     }
-    expect([...table.keys()]).toEqual(['M10', 'U8'])
+    expect([...table.keys()]).toEqual(['tram:M10', 'subway:U8'])
   })
 
-  it('reports a change when a line changes type', () => {
+  it('reports a change when the same name appears under a new type', () => {
     const table = seed()
-    expect(recordLineSightings(table, [['M10', 'subway'], ['U8', 'subway']], 11000, LINGER)).toBe(true)
-    expect(table.get('M10')?.product).toBe('subway')
+    expect(recordLineSightings(table, [B('M10', 'subway'), B('U8', 'subway')], 11000, LINGER)).toBe(true)
+    expect(table.get('subway:M10')?.product).toBe('subway')
   })
 
   it('ignores an empty line name', () => {
     const table = new Map<string, LineSighting>()
-    expect(recordLineSightings(table, [['', 'tram']], 1000, LINGER)).toBe(false)
+    expect(recordLineSightings(table, [B('', 'tram')], 1000, LINGER)).toBe(false)
     expect(table.size).toBe(0)
   })
 })

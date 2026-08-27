@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {berlinDateTime, buildRadarBody, parseRadar} from './hci.js'
+import {ALL_PRODUCTS, berlinDateTime, buildRadarBody, JNY_CAP, parseRadar, parseRadarPage, PRODUCT_GROUPS} from './hci.js'
 
 describe('berlinDateTime', () => {
   it('converts a UTC instant to Europe/Berlin wall-clock (summer, UTC+2)', () => {
@@ -11,8 +11,8 @@ describe('berlinDateTime', () => {
 })
 
 describe('buildRadarBody', () => {
-  it('builds a JourneyGeoPos request with rail-only filter', () => {
-    const body = buildRadarBody({north: 52.68, west: 13.08, south: 52.34, east: 13.76}, '20260820', '230819', 2000)
+  it('builds a JourneyGeoPos request for the mask it is given', () => {
+    const body = buildRadarBody({north: 52.68, west: 13.08, south: 52.34, east: 13.76}, '20260820', '230819', 2000, 7)
     const req = body.svcReqL[0]
     expect(req.meth).toBe('JourneyGeoPos')
     expect(req.req.rect).toEqual({llCrd: {x: 13080000, y: 52340000}, urCrd: {x: 13760000, y: 52680000}})
@@ -40,13 +40,32 @@ describe('parseRadar', () => {
       ]
     }}]
   }
-  it('parses journeys into rail vehicles only', () => {
+  it('parses journeys of every mode, dropping only the ones without a position', () => {
     const vehicles = parseRadar(json, '23:00:00')
-    expect(vehicles.map(v => v.id)).toEqual(['s1', 'u1'])
+    expect(vehicles.map(v => v.id)).toEqual(['s1', 'u1', 'b1']) // t1 has pos: null
     expect(vehicles[0]).toMatchObject({line: 'S9', product: 'suburban', lat: 52.46, lon: 13.49, nextStop: 'S Treptower Park'})
     expect(vehicles[1]).toMatchObject({line: 'U2', product: 'subway'})
+    expect(vehicles[2]).toMatchObject({line: 'M29', product: 'bus'})
+  })
+  it('reports the raw journey count, so the caller can spot the gate\'s cap', () => {
+    const page = parseRadarPage(json, '23:00:00')
+    expect(page.journeys).toBe(4)   // includes the one we drop
+    expect(page.vehicles.length).toBe(3)
   })
   it('throws on server error', () => {
     expect(() => parseRadar({svcResL: [{err: 'NOOK', res: {}}]}, '23:00:00')).toThrow()
+  })
+})
+
+describe('PRODUCT_GROUPS', () => {
+  it('covers every product bit exactly once', () => {
+    expect(PRODUCT_GROUPS.reduce((a, b) => a | b, 0)).toBe(ALL_PRODUCTS)
+    expect(PRODUCT_GROUPS.reduce((a, b) => a + b, 0)).toBe(ALL_PRODUCTS) // disjoint
+  })
+  it('splits bus off on its own, because one request is capped', () => {
+    // measured: all products in one request returns exactly JNY_CAP journeys and
+    // loses ~130 vehicles; bus alone is ~675 and everything else ~460
+    expect(PRODUCT_GROUPS).toContain(8)
+    expect(JNY_CAP).toBe(1000)
   })
 })

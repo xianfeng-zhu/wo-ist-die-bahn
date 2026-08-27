@@ -1,8 +1,8 @@
 import {Map as GLMap, Marker, Popup, setWorkerUrl, type FilterSpecification, type MapLayerMouseEvent} from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import './style.css'
-import {fetchVehicles, BBox} from './hci.js'
-import {compareLineNames, filterVehicles, LineSighting, Product, recordLineSightings, shortId, Vehicle} from './vehicle.js'
+import {fetchAllVehicles, BBox, JNY_CAP} from './hci.js'
+import {compareLineNames, filterVehicles, Forecast, lineKey, LineSighting, Product, recordLineSightings, shortId, StopRef, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
@@ -22,15 +22,37 @@ setWorkerUrl(asset('maplibre-gl-worker.mjs'))
 const BERLIN_BBOX: BBox = {north: 52.68, west: 13.08, south: 52.34, east: 13.76}
 const POLL_INTERVAL_MS = 10000 // matches the official VBB livemap (Livemap.timeout = 10)
 const MAX_BACKOFF_MS = 60000
-// ?all=1 shows every returned vehicle (incl. FEX, bus) for testing the animation.
-// The product mask has to widen too: mask 7 excludes them server-side, so
-// relaxing only the client-side name gate would change nothing.
-const TEST_ALL = new URLSearchParams(location.search).has('all')
-const RAIL_ONLY = 7
-const EVERY_PRODUCT = 1023
 
-const PRODUCT_COLORS: Record<Product, string> = {suburban: '#2e7d32', subway: '#1565c0', tram: '#c62828'}
-const PRODUCT_LABELS: Record<Product, string> = {suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram'}
+/**
+ * Badge colour for a line with no colour of its own (`lineColors`).
+ *
+ * Bus and ferry are VBB's official values, from the linienfarben CSV rows named
+ * `Bus` (#a5027d) and `Fähre` (#009bd5). The CSV has no row for long distance,
+ * and its RE/RB rows are per line, so those two fall back to greys — dark for
+ * ICE/IC, mid for a regional line the CSV does not list. The three rail colours
+ * predate the CSV and stay as they are: every S-Bahn and U-Bahn line has its own
+ * colour, so in practice only trams read this table.
+ */
+const PRODUCT_COLORS: Record<Product, string> = {
+  suburban: '#2e7d32',
+  subway: '#1565c0',
+  tram: '#c62828',
+  bus: '#a5027d',
+  ferry: '#009bd5',
+  express: '#37474f',
+  regional: '#5e5e5d'
+}
+
+/** Menu order too: local modes first, then the ones that leave the city. */
+const PRODUCT_LABELS: Record<Product, string> = {
+  suburban: 'S-Bahn',
+  subway: 'U-Bahn',
+  tram: 'Tram',
+  bus: 'Bus',
+  ferry: 'Ferry',
+  regional: 'Regional',
+  express: 'ICE / IC'
+}
 
 // MapLibre GL: native smooth trackpad zoom, WebGL tile rendering (no white
 // flashing, no tile-management gaps), tile overscaling capped by the engine.
@@ -108,7 +130,9 @@ map.on('moveend', () => {
 // --- vehicle markers (line-labeled badges) ---
 const markers = new Map<string, Marker>()
 /** Active product filter (one flag per mode; all on by default). */
-const filters: Record<Product, boolean> = {suburban: true, subway: true, tram: true}
+const filters: Record<Product, boolean> = {
+  suburban: true, subway: true, tram: true, bus: true, ferry: true, express: true, regional: true
+}
 /**
  * Active line-name selection. An EMPTY set means nothing is picked and so shows
  * nothing, exactly as unticking every type does.
@@ -125,6 +149,8 @@ const visibleVehicles = () =>
 let vehicles: Vehicle[] = []
 let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
+/** Product masks whose last response hit the gate's journey cap (see `JNY_CAP`). */
+let capped: number[] = []
 
 // --- forecast-driven, track-following animation ---
 // Position comes from the operator's own ~30 s forecast (Vehicle.forecast),
@@ -156,7 +182,10 @@ const statusEl = document.getElementById('statusbar')!
 function updateStatus() {
   const ago = lastUpdate ? Math.round((Date.now() - lastUpdate) / 1000) : 0
   const count = visibleVehicles().length
-  statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago`
+  // Say so when the feed is capped. Data loss the user cannot see is worse than
+  // a longer status line: the map looks complete and is not.
+  const capNote = capped.length > 0 ? ' · feed capped' : ''
+  statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago${capNote}`
   statusEl.dataset.state = conn
 }
 setInterval(updateStatus, 1000)
@@ -206,7 +235,7 @@ const SHAPE_FIT_LIMIT_M = 250
  * shipping per-variant shapes can be measured rather than assumed. Read it from
  * `window.__lb.guardStats`.
  */
-const guardStats = {rebuilds: 0, badFit: 0, tooFast: 0}
+const guardStats = {rebuilds: 0, badFit: 0, tooFast: 0, noShape: 0}
 
 /** Forecast points -> distance along `path`, forced non-decreasing so a point
  *  that projects backwards (a curve doubling back) cannot stall the motion. */
@@ -238,6 +267,28 @@ function updateSegment(v: Vehicle, m: Marker) {
     return
   }
   const start = {lat: f.pts[0][0], lon: f.pts[0][1]}
+  /*
+   * The operator's own forecast as the path, continued straight to the target.
+   *
+   * The forecast IS road geometry: four points along the way the vehicle is
+   * about to take. It only spans ~30 s though, so a path that stopped there
+   * would strand the vehicle short of its stop.
+   */
+  const forecastPath = (): Array<[number, number]> => {
+    const last = f.pts[f.pts.length - 1]
+    const to: [number, number] = [target.lat, target.lon]
+    return metresBetween(last, to) > 25 ? [...f.pts, to] : [...f.pts]
+  }
+  guardStats.rebuilds++
+  // Bus, ferry, regional and long-distance ship no GTFS shapes — see AGENTS.md
+  // for the payload measurement behind that. Their forecast beats a straight line
+  // between stops, so use it directly instead of asking buildSegmentPath for a
+  // shape that is not there.
+  if (!(lineShapes[v.line] ?? []).some(s => s.length >= 2)) {
+    guardStats.noShape++
+    setSegment(v, forecastPath(), f, target, start)
+    return
+  }
   let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon}, f.pts)
   // Does the chosen GTFS track actually pass through the forecast? pickShape
   // takes the best of the line's variants, but a line can still be missing the
@@ -250,7 +301,6 @@ function updateSegment(v: Vehicle, m: Marker) {
     const t = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
     return impliedSpeed(f.ms, a, t, path) > SPEED_SANITY_MPS
   }
-  guardStats.rebuilds++
   const unfit = badFit()
   const fast = !unfit && tooFast()
   if (unfit) guardStats.badFit++
@@ -258,13 +308,14 @@ function updateSegment(v: Vehicle, m: Marker) {
   if (unfit || fast) {
     // Wrong track: either the forecast does not lie on it, or following it
     // would need an impossible speed (a shape that takes the long way round, or
-    // a ring line where projection wraps). Follow the forecast points, then
-    // continue straight to the target: the forecast alone spans only ~30 s, so a
-    // path that stopped there would strand the vehicle short of its stop.
-    const last = f.pts[f.pts.length - 1]
-    const to: [number, number] = [target.lat, target.lon]
-    path = metresBetween(last, to) > 25 ? [...f.pts, to] : [...f.pts]
+    // a ring line where projection wraps).
+    path = forecastPath()
   }
+  setSegment(v, path, f, target, start)
+}
+
+/** Store the animation state for one vehicle against a chosen path. */
+function setSegment(v: Vehicle, path: Array<[number, number]>, f: Forecast, target: StopRef, start: {lat: number; lon: number}) {
   const alongs = alongsOnPath(path, f.pts)
   const total = projectOntoPath(path, {lat: path[path.length - 1][0], lon: path[path.length - 1][1]}).along
   // Carry the on-screen position across the re-anchor. The reported position can
@@ -542,18 +593,45 @@ loadNetworkLayers()
 let nextDelay = POLL_INTERVAL_MS
 let failures = 0
 let controller: AbortController | null = null
+let inFlight = false
+/** The one pending poll. Replacing it, never adding, keeps a single loop. */
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+const schedule = (delay: number) => {
+  clearTimeout(pollTimer)
+  pollTimer = setTimeout(() => void poll(), delay)
+}
 async function poll() {
+  /*
+   * Nothing is drawn in a hidden tab, so nothing needs fetching.
+   *
+   * With every mode on, a poll moves about 2.2 MB, so a forgotten background tab
+   * would pull roughly 13 MB a minute for no viewer. The animation loop already
+   * stops on its own — the browser does not run rAF in a hidden tab — so this is
+   * the other half of the same idea. Becoming visible polls at once, and until it
+   * answers the status bar says how old the data is.
+   */
+  if (document.hidden) {
+    schedule(POLL_INTERVAL_MS)
+    return
+  }
+  if (inFlight) return // a visibility change can ask while one is already running
+  inFlight = true
   controller = new AbortController()
   const t = setTimeout(() => controller!.abort(), 15000)
   try {
-    // ?all=1: include every returned vehicle (e.g. FEX) for animation testing
-    vehicles = await fetchVehicles(BERLIN_BBOX, 2000, controller.signal, !TEST_ALL, TEST_ALL ? EVERY_PRODUCT : RAIL_ONLY)
+    // every mode, fetched as several product groups because one request is capped
+    const sweep = await fetchAllVehicles(BERLIN_BBOX, 2000, controller.signal)
+    vehicles = sweep.vehicles
+    capped = sweep.capped
+    if (capped.length > 0) {
+      logError(`feed capped at ${JNY_CAP} journeys for product mask ${capped.join(', ')} — some vehicles are missing`)
+    }
     lastUpdate = Date.now()
     failures = 0
     nextDelay = POLL_INTERVAL_MS
     conn = 'live'
     // the menus offer exactly what is running, so refresh them from every poll
-    updateLiveLines(vehicles.map(v => [v.line, v.product] as [string, Product]))
+    updateLiveLines(vehicles)
     if (recorder) {
       const drawn = new Map<string, [number, number]>()
       for (const [id, s] of animStates) if (s.renderPos) drawn.set(id, s.renderPos)
@@ -568,11 +646,18 @@ async function poll() {
     nextDelay = Math.min(POLL_INTERVAL_MS * 2 ** failures, MAX_BACKOFF_MS)
   } finally {
     clearTimeout(t)
-    setTimeout(() => void poll(), nextDelay)
+    inFlight = false
+    schedule(nextDelay)
   }
 }
 
 void poll()
+// Coming back to the tab: refresh now rather than waiting out the interval.
+// `schedule` replaces the pending timer instead of adding one, so this can never
+// leave two poll loops running side by side.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - lastUpdate > POLL_INTERVAL_MS) schedule(0)
+})
 
 // --- mode filters + layer toggles ---
 const filterEl = document.getElementById('filters')!
@@ -628,11 +713,16 @@ map.on('click', () => { if (document.body.classList.contains('settings-open')) s
  * Both drive the same `filterVehicles(vehicles, filters, lineFilter)`. An empty
  * line set means NONE, not all, which is what lets "All lines" untick everything
  * the way "All types" does; `lineMode` carries "all" instead.
+ *
+ * The Line menu also has a search field, because with every mode on the network
+ * runs about 260 lines at once and 187 of them are buses. Scrolling that list to
+ * find one route is not a filter, it is a haystack.
  */
 
 /**
- * The lines that are running right now, with the type and the last sighting of
- * each. Built from the live polls, and from nothing else.
+ * The lines that are running right now, keyed by `lineKey` (mode AND name, never
+ * the name alone — a rail replacement bus takes the name of the line it
+ * replaces). Built from the live polls, and from nothing else.
  *
  * It used to be seeded from tracks.json, which listed all 190 lines in the
  * network. Most of them select nothing: a Sunday morning has about 90 lines out,
@@ -668,6 +758,27 @@ function multiSelect(title: string) {
 const typeUi = multiSelect('Type')
 const lineUi = multiSelect('Line')
 
+/*
+ * The Line menu is a fixed search field over a rebuilt list.
+ *
+ * The list has to be replaced on every tick (the master box, the group headings
+ * and the captions all change), and replacing the search field with it would
+ * take the focus and the caret away mid-word. So the field lives outside the
+ * part that gets rebuilt.
+ */
+const lineSearch = document.createElement('input')
+lineSearch.type = 'search'
+lineSearch.className = 'multi-search'
+lineSearch.placeholder = 'search lines'
+lineSearch.setAttribute('aria-label', 'Search lines')
+const lineList = document.createElement('div')
+lineList.className = 'multi-list'
+lineUi.body.append(lineSearch, lineList)
+lineSearch.oninput = () => rebuildLines()
+/** Rows the search field allows through. Empty query matches everything. */
+const matchesSearch = (name: string): boolean =>
+  name.toLowerCase().includes(lineSearch.value.trim().toLowerCase())
+
 /** Types with a line running now, in the order PRODUCT_LABELS declares them. */
 const presentTypes = (): Product[] => {
   const have = new Set([...liveLines.values()].map(e => e.product))
@@ -693,24 +804,27 @@ function checkRow(text: string, checked: boolean, onSet: (on: boolean) => void, 
 }
 
 function describeTypes(): string {
-  const on = presentTypes().filter(p => filters[p])
+  const types = presentTypes()
+  const on = types.filter(p => filters[p])
   if (on.length === 0) return 'none'
-  if (on.length === presentTypes().length) return 'all'
-  return on.map(p => PRODUCT_LABELS[p]).join(', ')
+  if (on.length === types.length) return 'all'
+  // seven modes named in full overflow the panel, so switch to a count
+  return on.length <= 2 ? on.map(p => PRODUCT_LABELS[p]).join(', ') : `${on.length} types`
 }
 
-/** Lines that could be shown right now: running, and of a ticked type. */
-const selectableLines = (): string[] =>
-  [...liveLines].filter(([, e]) => filters[e.product]).map(([n]) => n)
+/** Lines that could be shown right now: running, and of a ticked type. Keys. */
+const selectableLines = (): LineSighting[] =>
+  [...liveLines.values()].filter(e => filters[e.product])
 
 function describeLines(): string {
   if (lineMode === 'all') return 'all'
   // count only what the menu offers: a line the user picked can stop running,
   // and it stays in the selection so it returns ticked, but naming it here would
   // report vehicles that are not on the map
-  const names = selectableLines().filter(n => lineFilter.has(n)).sort(compareLineNames)
-  if (names.length === 0) return 'none'
-  return names.length <= 3 ? names.join(', ') : `${names.length} lines`
+  const picked = selectableLines().filter(e => lineFilter.has(lineKey(e)))
+  if (picked.length === 0) return 'none'
+  if (picked.length > 3) return `${picked.length} lines`
+  return picked.map(e => e.line).sort(compareLineNames).join(', ')
 }
 
 /** A greyed line of explanation, for a menu that has nothing to offer yet. */
@@ -757,39 +871,45 @@ function rebuildTypes() {
 
 /** Forget any picked line whose type is no longer shown. */
 function dropHiddenLines() {
-  for (const name of [...lineFilter]) {
-    const p = liveLines.get(name)?.product
-    if (p && !filters[p]) lineFilter.delete(name)
+  for (const key of [...lineFilter]) {
+    const p = liveLines.get(key)?.product
+    if (p && !filters[p]) lineFilter.delete(key)
   }
 }
 
 /** A line is ticked when the mode is `all`, or when it is in the selection. */
-const lineTicked = (name: string): boolean => lineMode === 'all' || lineFilter.has(name)
+const lineTicked = (e: LineSighting): boolean => lineMode === 'all' || lineFilter.has(lineKey(e))
 
 /** Move to an explicit selection, seeded from whatever is ticked right now. */
 function makeSelectionExplicit() {
   if (lineMode === 'custom') return
   lineMode = 'custom'
-  lineFilter = new Set(selectableLines())
+  lineFilter = new Set(selectableLines().map(lineKey))
 }
 
 function rebuildLines() {
   const all = selectableLines()
+  const query = lineSearch.value.trim()
+  lineSearch.hidden = liveLines.size === 0
   if (all.length === 0) {
     // no line to offer: either no data yet, or every type is switched off
-    lineUi.body.replaceChildren(hint(liveLines.size === 0 ? WAITING : 'no type selected'))
+    lineList.replaceChildren(hint(liveLines.size === 0 ? WAITING : 'no type selected'))
     lineUi.caption.textContent = describeLines()
     return
   }
   const everyOne = all.every(lineTicked)
-  lineUi.body.replaceChildren(
+  lineList.replaceChildren(
     // Ticks and unticks every line, like "All types" does for the types. Before,
     // this only ticked itself: the selection meant "all" by being empty, so the
     // line boxes stayed blank and unticking it did nothing.
+    //
+    // It covers EVERY selectable line, not just the ones the search shows. A box
+    // labelled "All lines" that quietly meant "the 4 lines matching bus" would be
+    // a trap; the search narrows what you can see, not what this means.
     checkRow('All lines', everyOne, on => {
       if (on) {
         lineMode = 'all'
-        lineFilter = new Set(all)
+        lineFilter = new Set(all.map(lineKey))
       } else {
         lineMode = 'custom'
         lineFilter = new Set()
@@ -798,32 +918,37 @@ function rebuildLines() {
       render()
     })
   )
+  let shown = 0
   for (const p of presentTypes()) {
     if (!filters[p]) continue // only offer lines you could actually see
-    const names = [...liveLines].filter(([, e]) => e.product === p).map(([n]) => n).sort(compareLineNames)
-    if (names.length === 0) continue
+    const group = [...liveLines.values()]
+      .filter(e => e.product === p && matchesSearch(e.line))
+      .sort((a, b) => compareLineNames(a.line, b.line))
+    if (group.length === 0) continue
     const head = document.createElement('div')
     head.className = 'multi-group'
-    head.textContent = PRODUCT_LABELS[p]
-    lineUi.body.append(head)
-    for (const n of names) {
-      lineUi.body.append(checkRow(n, lineTicked(n), on => {
+    head.textContent = `${PRODUCT_LABELS[p]} (${group.length})`
+    lineList.append(head)
+    for (const e of group) {
+      shown++
+      lineList.append(checkRow(e.line, lineTicked(e), on => {
         makeSelectionExplicit()
-        if (on) lineFilter.add(n)
-        else lineFilter.delete(n)
+        if (on) lineFilter.add(lineKey(e))
+        else lineFilter.delete(lineKey(e))
         // back to every line ticked: return to `all`, so a line added later joins
-        if (all.every(x => lineFilter.has(x))) lineMode = 'all'
+        if (all.every(x => lineFilter.has(lineKey(x)))) lineMode = 'all'
         rebuildLines()
         render()
       }))
     }
   }
+  if (shown === 0) lineList.append(hint(`no line matches "${query}"`))
   lineUi.caption.textContent = describeLines()
 }
 
 /** Record the lines seen in a poll, and rebuild the menus if the list changed. */
-function updateLiveLines(entries: Iterable<readonly [string, Product]>) {
-  if (!recordLineSightings(liveLines, entries, Date.now(), LINE_LINGER_MS)) return
+function updateLiveLines(seen: Iterable<Vehicle>) {
+  if (!recordLineSightings(liveLines, seen, Date.now(), LINE_LINGER_MS)) return
   rebuildTypes()
   rebuildLines()
 }

@@ -21,8 +21,9 @@ Linienfarben colour table, both published at
 **Modified: yes.** These files are not the VBB data. They are derived from it by
 `scripts/prepare-data.mjs`, which:
 
-- keeps only S-Bahn, U-Bahn and Berlin tram routes, and drops regional, express,
-  bus and ferry ones
+- keeps route and stop GEOMETRY for S-Bahn, U-Bahn and Berlin tram only, and
+  drops the regional, express, bus and ferry shapes (the app shows those modes,
+  but animates them from the operator's live forecast instead of GTFS track)
 - selects up to 12 route variants per line from the ~2,200 GTFS shapes, after
   collapsing near-duplicates
 - simplifies every shape with Douglas–Peucker at a 10 m tolerance, reducing
@@ -31,7 +32,8 @@ Linienfarben colour table, both published at
   rails is drawn once rather than once per line (`scripts/tracks.mjs`)
 - rounds coordinates to five decimal places, about one metre
 - keeps only rail stops, and only their name and position
-- extracts line colours from the Linienfarben CSV for the lines this app renders
+- extracts every published line colour from the Linienfarben CSV, dropping only
+  the single-letter DB category rows, which are not line names
 
 ## Live vehicle positions — VBB HAFAS
 

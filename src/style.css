@@ -144,3 +144,14 @@ body.dense .vid { display: none; }
 }
 /* the menus hold only lines that are running, so they can be empty for a moment */
 #filters .multi-hint { color: #888; font-style: italic; padding: 2px 0; }
+/*
+ * Line search. With every mode on, about 260 lines run at once and 187 are
+ * buses, so the list needs a way in. The field sits OUTSIDE .multi-list, which is
+ * replaced on every tick — rebuilding an input would take the focus with it.
+ */
+#filters .multi-search {
+  width: 100%; box-sizing: border-box; margin: 4px 0 2px;
+  padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px; font: inherit;
+}
+#filters .multi-body { max-height: none; overflow: visible; }
+#filters .multi-list { max-height: 210px; overflow: auto; }

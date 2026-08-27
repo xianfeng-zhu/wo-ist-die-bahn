@@ -1,6 +1,20 @@
 import {decodePolyline} from './polyline.js'
 
-export type Product = 'suburban' | 'subway' | 'tram'
+/**
+ * Every mode the VBB radar returns. Measured against the live feed on
+ * 2026-08-27 by asking for one product bit at a time (see AGENTS.md):
+ *
+ *   bit 0  cls 1   `S`      S-Bahn        16 lines
+ *   bit 1  cls 2   `U`      U-Bahn         9 lines
+ *   bit 2  cls 4   `Tram`   tram          27 lines
+ *   bit 3  cls 8   `Bus`    bus          187 lines (also labelled `Kleinbus`)
+ *   bit 4  cls 16  `Fähre`  ferry          1 line
+ *   bit 5  cls 32  `ICE`/`IC`  long distance  3 trains
+ *   bit 6  cls 64  `RE`/`RB`   regional      17 lines
+ *
+ * Bits 7-9 are accepted by the gate but return nothing in the Berlin box.
+ */
+export type Product = 'suburban' | 'subway' | 'tram' | 'bus' | 'ferry' | 'express' | 'regional'
 
 /**
  * The operator's own short-term motion forecast for one vehicle: positions at
@@ -45,7 +59,9 @@ export interface Vehicle {
   forecast?: Forecast
 }
 
-export const PRODUCT_BY_CLS: Record<number, Product> = {1: 'suburban', 2: 'subway', 4: 'tram'}
+export const PRODUCT_BY_CLS: Record<number, Product> = {
+  1: 'suburban', 2: 'subway', 4: 'tram', 8: 'bus', 16: 'ferry', 32: 'express', 64: 'regional'
+}
 
 /**
  * Short, stable, unique label for a HAFAS journey id — readable off the map,
@@ -59,10 +75,22 @@ export function shortId(id: string): string {
   return p.length >= 3 && p[1] && p[2] ? `${p[1]}-${p[2]}` : id
 }
 
-// Defensive second gate: HAFAS can classify non-S/U/tram services (e.g. the
-// FEX airport express) under a rail cls bit, so also require the line name to
-// match the product (S1..S85, U1..U12, trams M1-M17 or plain 2-digit numbers).
-const LINE_PATTERNS: Record<Product, RegExp> = {
+/**
+ * Defensive second gate for the three rail modes only.
+ *
+ * HAFAS can classify a non-S/U/tram service (the FEX airport express) under a
+ * rail `cls` bit, so a rail product also has to look like a rail line name
+ * (S1..S85, U1..U12, trams M1-M17 or a plain 2-digit number).
+ *
+ * The other four modes have NO name gate, and must not get one. Bus names are
+ * `125`, `M29`, `X34`, `893`, `TXL`; long-distance names are train numbers
+ * (`ICE 1130`). More to the point, a rail replacement bus is named after the
+ * line it replaces — the live feed today has a BUS called `S9` and a BUS called
+ * `U6` — so a name pattern would be actively wrong there. `cls` is the only
+ * trustworthy source of the mode, and the gate above exists purely because one
+ * service is known to arrive with the wrong bit.
+ */
+const LINE_PATTERNS: Partial<Record<Product, RegExp>> = {
   suburban: /^S\d{1,2}$/,
   subway: /^U\d{1,2}$/,
   tram: /^M?\d{1,2}$/
@@ -85,8 +113,25 @@ export function compareLineNames(a: string, b: string): number {
 
 export type Filters = Record<Product, boolean>
 
+/** Something with a mode and a line name — a `Vehicle`, or a menu row. */
+export interface LineRef {
+  product: Product
+  line: string
+}
+
 /**
- * Product filter, plus an optional line-name filter.
+ * Identify a line by MODE AND NAME, never by name alone.
+ *
+ * Names are not unique across modes. A rail replacement bus takes the name of
+ * the line it replaces, so the live feed can hold a bus called `S9` beside the
+ * real S-Bahn S9, and a bus called `U6` beside the U-Bahn U6. Keyed on the name
+ * alone, one would hide the other in the menu and ticking either would show
+ * both.
+ */
+export const lineKey = (v: LineRef): string => `${v.product}:${v.line}`
+
+/**
+ * Product filter, plus an optional line filter keyed by `lineKey`.
  *
  * Omit `lines` for "no line filter". An EMPTY set means nothing is selected, and
  * so matches nothing — it does not mean "all". That mirrors the product filter,
@@ -94,38 +139,39 @@ export type Filters = Record<Product, boolean>
  * lines" box tick and untick every line the way "All types" does.
  */
 export function filterVehicles(vehicles: Vehicle[], filters: Filters, lines?: ReadonlySet<string>): Vehicle[] {
-  return vehicles.filter(v => filters[v.product] && (!lines || lines.has(v.line)))
+  return vehicles.filter(v => filters[v.product] && (!lines || lines.has(lineKey(v))))
 }
 
-/** One line seen running, with its type and the time it was last seen. */
-export interface LineSighting {
-  product: Product
+/** One line seen running, with its mode, name and the time it was last seen. */
+export interface LineSighting extends LineRef {
   seen: number
 }
 
 /**
- * Fold one poll into the table of lines running now, editing it in place.
+ * Fold one poll into the table of lines running now, editing it in place. The
+ * table is keyed by `lineKey`.
  *
  * A line stays in the table for `lingerMs` after its last sighting, so one poll
  * that misses a line's only vehicle does not remove it. Returns true when the
- * names in the table changed, or a line changed type — the caller rebuilds its
- * menus only then, so an open menu does not redraw under the user's pointer.
+ * set of lines changed — the caller rebuilds its menus only then, so an open
+ * menu does not redraw under the user's pointer.
  */
 export function recordLineSightings(
   table: Map<string, LineSighting>,
-  entries: Iterable<readonly [string, Product]>,
+  seen: Iterable<LineRef>,
   now: number,
   lingerMs: number
 ): boolean {
   let changed = false
-  for (const [name, product] of entries) {
-    if (!name) continue
-    if (table.get(name)?.product !== product) changed = true
-    table.set(name, {product, seen: now})
+  for (const v of seen) {
+    if (!v.line) continue
+    const key = lineKey(v)
+    if (!table.has(key)) changed = true
+    table.set(key, {product: v.product, line: v.line, seen: now})
   }
-  for (const [name, e] of table) {
+  for (const [key, e] of table) {
     if (now - e.seen <= lingerMs) continue
-    table.delete(name)
+    table.delete(key)
     changed = true
   }
   return changed
@@ -191,23 +237,15 @@ export interface Journey {
   }
 }
 
-/**
- * Strict mode keeps only S/U/tram by cls AND line name (e.g. rejects FEX,
- * which HAFAS can classify under a rail cls bit). Test mode (`strictName:
- * false`) keeps every returned vehicle, inferring a display product from the
- * line name — used with `?all=1` to test animation on any running service.
- */
-const INFER_PRODUCT: Record<string, Product> = {S: 'suburban', U: 'subway', T: 'tram'}
-
-export function transformJourney(j: Journey, common: Common, nowTime: string, strictName = true): Vehicle | null {
+export function transformJourney(j: Journey, common: Common, nowTime: string): Vehicle | null {
   const prod = common.prods[j.prodX ?? -1]
-  let product = productFromCls(prod?.cls)
-  if (!product) {
-    if (strictName) return null
-    const head = (prod?.name ?? '').charAt(0)
-    product = INFER_PRODUCT[head] ?? 'tram'
-  }
-  if (strictName && !LINE_PATTERNS[product].test(prod?.name ?? '')) return null // e.g. FEX
+  // `cls` decides the mode, and nothing else does. An unmapped bit is dropped
+  // rather than guessed: a wrong badge colour and a wrong menu entry are worse
+  // than a missing vehicle, and every bit the gate returns is mapped today.
+  const product = productFromCls(prod?.cls)
+  if (!product) return null
+  const namePattern = LINE_PATTERNS[product]
+  if (namePattern && !namePattern.test(prod?.name ?? '')) return null // e.g. FEX under a rail bit
   if (!j.pos?.x || !j.pos?.y) return null
   const nowSec = toSec(nowTime)
   const stopovers = j.stopL ?? []

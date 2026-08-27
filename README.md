@@ -1,11 +1,14 @@
 # wo ist die bahn
 
-Live map of Berlin S-Bahn, U-Bahn and tram vehicles.
+Live map of every Berlin transit vehicle: S-Bahn, U-Bahn, tram, bus, ferry,
+regional and long-distance trains. About 1,100 of them at once.
 
 A static web app. There is no backend: the browser polls VBB's live endpoint
-directly every 10 seconds, and moves each vehicle along its real track in
-between, using the operator's own short-term forecast. Nothing about the motion
-is invented from a timetable.
+directly every 10 seconds, and moves each vehicle in between using the operator's
+own short-term forecast. Nothing about the motion is invented from a timetable.
+
+S-Bahn, U-Bahn and trams follow their real GTFS track. The other modes follow the
+operator's forecast polyline, which is road geometry for the next 30 seconds.
 
 **Live:** <https://xianfeng-zhu.github.io/wo-ist-die-bahn/>
 
@@ -14,7 +17,7 @@ is invented from a timetable.
 ```sh
 npm install
 npm run build          # -> dist/
-npm test               # 182 tests
+npm test               # 197 tests
 npm run dev            # http://localhost:5173
 ```
 
@@ -71,6 +74,14 @@ test access, and agree to their usage rules before production access.
 **Register with VBB before running a public deployment.** Their conditions
 include querying efficiently, naming VBB as the source of the timetable data, and
 accepting that access can be withdrawn.
+
+**Every mode costs bandwidth.** Showing all of them takes three requests per
+poll — the gate caps one response at 1,000 journeys, and Berlin runs more
+vehicles than that — which is about **2.2 MB every 10 seconds**, or 13 MB a
+minute per open tab. Polling stops while the tab is hidden. If that is too much
+for your deployment, the levers are: raise `POLL_INTERVAL_MS`, drop a mask from
+`PRODUCT_GROUPS` in `src/hci.ts`, or fetch the visible viewport instead of all of
+Berlin (`BERLIN_BBOX` in `src/main.ts`).
 
 The map tiles come from the OpenStreetMap Foundation's servers, which are
 donation funded and carry no availability guarantee. If your fork attracts real
