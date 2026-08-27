@@ -4,12 +4,17 @@ import {LatLon, maxResidualM, projectOntoPath, slicePath} from './motion.js'
 export type Shape = Array<[number, number]>
 
 /**
- * Route variants keyed by line name.
+ * Route variants keyed by `lineKey` — MODE AND NAME, never the name alone.
  *
- * A line has more than one because branches and short turns do not share
+ * A line has more than one variant because branches and short turns do not share
  * geometry, and the two ring directions (S41/S42) run different track. Shipping
  * only one per line was the root cause of the fit guards in main.ts: 6.3% of
  * live vehicles projected onto a shape that missed by 300 m to 6.5 km.
+ *
+ * The mode has to be part of the key because names collide across modes: Berlin
+ * runs a BUS called S9, U6, M1, M2, M8, 21 and 27, each named after the rail line
+ * it replaces or parallels. Keyed by name, those buses were handed a railway to
+ * drive along.
  */
 export type LineShapes = Record<string, Shape[]>
 

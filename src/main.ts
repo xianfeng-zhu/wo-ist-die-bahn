@@ -298,12 +298,18 @@ function updateSegment(v: Vehicle, m: Marker) {
   // for the payload measurement behind that. Their forecast beats a straight line
   // between stops, so use it directly instead of asking buildSegmentPath for a
   // shape that is not there.
-  if (!(lineShapes[v.line] ?? []).some(s => s.length >= 2)) {
+  // Look the shapes up by MODE AND NAME. By name alone, the bus called S9 got
+  // the S-Bahn S9's rails, the bus called 21 got tram 21's, and so on for M1, M2,
+  // M8, 27 and U6 — a bus drawn along a railway. Measured before the fix: of 519
+  // live buses, 33 matched a rail line's name and sat a median 159 m from the
+  // track they had been given.
+  const key = lineKey(v)
+  if (!(lineShapes[key] ?? []).some(s => s.length >= 2)) {
     guardStats.noShape++
     setSegment(v, forecastPath(), f, target, start)
     return
   }
-  let path = buildSegmentPath(lineShapes, v.line, start, {lat: target.lat, lon: target.lon}, f.pts)
+  let path = buildSegmentPath(lineShapes, key, start, {lat: target.lat, lon: target.lon}, f.pts)
   // Does the chosen GTFS track actually pass through the forecast? pickShape
   // takes the best of the line's variants, but a line can still be missing the
   // exact variant this vehicle is on (prepare-data.mjs caps how many it ships).
@@ -525,11 +531,14 @@ async function loadNetworkLayers() {
     lineShapes = {}
     for (const f of routes.features ?? []) {
       const line = f.properties?.line
+      const product = f.properties?.product as Product | undefined
       const coords = f.geometry?.coordinates
-      if (line && Array.isArray(coords) && coords.length >= 2) {
-        // Several features share a line name — one per route variant — so collect
-        // them all. GeoJSON [lon, lat] -> [lat, lon].
-        ;(lineShapes[line] ??= []).push(coords.map((c: [number, number]) => [c[1], c[0]]))
+      if (line && product && Array.isArray(coords) && coords.length >= 2) {
+        // Keyed by mode AND name (`lineKey`), never the name alone: routes.json
+        // holds rail geometry, and a bus shares its name with a rail line often
+        // enough to matter. Several features share one key — one per route
+        // variant — so collect them all. GeoJSON [lon, lat] -> [lat, lon].
+        ;(lineShapes[lineKey({product, line})] ??= []).push(coords.map((c: [number, number]) => [c[1], c[0]]))
       }
     }
   } catch (err) {
