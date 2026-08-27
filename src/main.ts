@@ -5,6 +5,12 @@ import {fetchAllVehicles, BBox, JNY_CAP} from './hci.js'
 import {compareLineNames, filterVehicles, Forecast, lineKey, LineSighting, Product, recordLineSightings, shortId, StopRef, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {textOn} from './contrast.js'
+import {fetchJourneyDetail, fetchStationBoard} from './hci.js'
+import {markProgress, type Departure, type JourneyDetail} from './journey.js'
+import {berlinSecondsOfDay} from './format.js'
+import {Panel} from './panel.js'
+import {noticeBody, stationView, vehicleView, type VehicleView} from './views.js'
+import {search} from './search.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
@@ -131,7 +137,24 @@ const map = new GLMap({
           'target="_blank" rel="noopener">OpenStreetMap</a> contributors'
       }
     },
-    layers: [{id: 'osm', type: 'raster', source: 'osm'}]
+    /*
+     * Mute the base map so the transit data is the subject.
+     *
+     * OSM's own styling is loud — bright yellow and orange roads, pink casings,
+     * strong greens — and at city scale it competes with ~700 vehicle dots for
+     * attention. Desaturating and lifting the black point pushes the city into
+     * the background without hiding it: street names stay readable, and the
+     * badges and route lines stop fighting the roads underneath.
+     *
+     * Done on the existing raster layer rather than by switching tile provider:
+     * no new dependency, no new attribution, nothing extra to serve.
+     */
+    layers: [{
+      id: 'osm',
+      type: 'raster',
+      source: 'osm',
+      paint: {'raster-saturation': -0.62, 'raster-contrast': -0.08, 'raster-brightness-min': 0.06}
+    }]
   },
   center: savedView?.center ?? [13.405, 52.52],
   zoom: savedView?.zoom ?? 12,
@@ -212,13 +235,30 @@ const TRACE_HZ = Number(new URLSearchParams(location.search).get('traceHz')) || 
 let recorder: MotionRecorder | null = null
 
 const statusEl = document.getElementById('statusbar')!
+/**
+ * The status bar.
+ *
+ * Counts and "updated Ns ago" are engineering facts, and with a 20 s poll the age
+ * sits at 15-20 s most of the time, which reads as stale to someone who does not
+ * know the design. So the full line belongs to the debug view.
+ *
+ * What stays for everyone is the one thing a rider needs: is this live? And it
+ * only appears when the answer is no. A map whose vehicles have quietly stopped
+ * moving looks exactly like a working one, which is the failure worth naming.
+ */
 function updateStatus() {
   const ago = lastUpdate ? Math.round((Date.now() - lastUpdate) / 1000) : 0
   const count = visibleVehicles().length
-  // Say so when the feed is capped. Data loss the user cannot see is worse than
-  // a longer status line: the map looks complete and is not.
   const capNote = capped.length > 0 ? ' · feed capped' : ''
-  statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago${capNote}`
+  if (DEBUG_AVAILABLE && debugCb.checked) {
+    statusEl.textContent = `${conn} · ${count} vehicles · updated ${ago}s ago${capNote}`
+    statusEl.hidden = false
+  } else if (conn === 'live' && capped.length === 0) {
+    statusEl.hidden = true
+  } else {
+    statusEl.textContent = conn === 'live' ? 'some vehicles missing' : `${conn} — positions may be old`
+    statusEl.hidden = false
+  }
   statusEl.dataset.state = conn
 }
 setInterval(updateStatus, 1000)
@@ -235,39 +275,37 @@ function badgeElement(v: Vehicle): HTMLElement {
   // debugging handles: the full jid for headless queries, the short id on hover
   el.dataset.vehicleId = v.id
   el.title = `${v.line} · ${shortId(v.id)}`
+  /*
+   * Say what this is, once, properly.
+   *
+   * MapLibre makes the marker focusable, so it is already in the tab order. But
+   * the badge read out as "S4291274-0": the debug caption below is `display:none`
+   * and so still part of `textContent`, running straight into the line name. An
+   * explicit label fixes the reading, and `aria-hidden` keeps the caption out of
+   * it whether it is visible or not.
+   */
+  el.setAttribute('role', 'button')
+  el.setAttribute('aria-label',
+    `${v.line} ${PRODUCT_LABELS[v.product]} to ${v.direction || 'unknown'} — open details`)
   // caption under the badge, shown only while the "IDs" toggle is on
   const vid = document.createElement('span')
   vid.className = 'vid'
+  vid.setAttribute('aria-hidden', 'true')
   vid.textContent = shortId(v.id)
   el.append(vid)
+  el.onclick = e => {
+    e.stopPropagation()
+    void showVehicle(v.id)
+  }
+  el.onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      void showVehicle(v.id)
+    }
+  }
   return el
 }
 
-function popupHtml(v: Vehicle): string {
-  return (
-    // toStop is what HAFAS declares; nextStop is inferred from times and picks
-    // the terminus when the real next stop's time has just passed
-    `<b>${v.line}</b> ${PRODUCT_LABELS[v.product]}<br>→ ${v.direction}<br>next: ${v.toStop?.name ?? v.nextStop ?? '—'}` +
-    (v.delayMs != null
-      ? `<br><span style="color:${v.delayMs >= 300000 ? '#c62828' : '#333'}">delay: ${Math.round(v.delayMs / 60000)} min</span>`
-      : '') +
-    /*
-     * Say where the position comes from.
-     *
-     * VBB publishes no measured positions: `trainPosMode: 'REPORT_ONLY'` returns
-     * zero vehicles for all seven modes, and the official GTFS-RT feed carries
-     * 7,232 trip updates and no vehicle positions at all. Every dot is computed
-     * from the timetable and the live delay, and every stop time in the feed is a
-     * whole minute (1,762 of 1,762 checked), with tram stops 1-3 minutes apart.
-     * So between two stops the position is an interpolation between two
-     * minute-rounded anchors, and it can be a couple of hundred metres from the
-     * vehicle you can see out of the window. Better to say so than to let the map
-     * imply a precision it does not have.
-     */
-    `<br><span class="est">estimated from timetable + delay, not GPS</span>` +
-    `<br><span class="pid">id: <b>${shortId(v.id)}</b><br>${v.id}</span>`
-  )
-}
 
 /**
  * Furthest (metres) a forecast point may sit from the chosen track before we
@@ -407,12 +445,10 @@ function render() {
     if (!m) {
       m = new Marker({element: badgeElement(v)})
         .setLngLat([v.lon, v.lat])
-        .setPopup(new Popup({offset: 20}).setHTML(popupHtml(v)))
         .addTo(map)
       markers.set(v.id, m)
     }
     updateSegment(v, m)
-    m.getPopup()?.setHTML(popupHtml(v))
   }
   for (const [id, m] of markers) {
     if (!seen.has(id)) {
@@ -622,6 +658,16 @@ async function loadNetworkLayers() {
   }
   try {
     const stations = await (await fetch(asset('stations.json'))).json()
+    // Keep the names, so a shared `?stop=` link has a title before its board loads
+    // and the search box has something to match on.
+    for (const f of stations.features ?? []) {
+      const id = f.properties?.id
+      const name = f.properties?.name
+      const c = f.geometry?.coordinates
+      if (id && name && Array.isArray(c)) {
+        stationIndex.set(String(id), {name: String(name), lat: c[1], lon: c[0]})
+      }
+    }
     map.addSource('stations', {type: 'geojson', data: stations})
     map.addLayer({
       id: 'stations-layer',
@@ -638,8 +684,12 @@ async function loadNetworkLayers() {
       }
     }, belowDebug())
     map.on('click', 'stations-layer', (e: MapLayerMouseEvent) => {
-      const name = e.features?.[0]?.properties?.name
-      if (name) new Popup({offset: 10}).setLngLat(e.lngLat).setHTML(String(name)).addTo(map)
+      const props = e.features?.[0]?.properties
+      const id = props?.id
+      const name = props?.name
+      // `id` is the HAFAS extId that stations.json now ships, so the board needs
+      // no name lookup. Without one there is nothing useful to show.
+      if (id && name) void showStop(String(id), String(name))
     })
     map.on('mouseenter', 'stations-layer', () => { map.getCanvas().style.cursor = 'pointer' })
     map.on('mouseleave', 'stations-layer', () => { map.getCanvas().style.cursor = '' })
@@ -648,6 +698,432 @@ async function loadNetworkLayers() {
   }
 }
 loadNetworkLayers()
+
+// ─────────── detail panel: a vehicle's journey, a stop's departures ───────────
+//
+// Replaces the map popups. A popup can hold a line name and a next stop; it
+// cannot hold 31 stops with times, and it is the wrong shape on a phone.
+//
+// The panel is addressable: `?vehicle=<shortId>` and `?stop=<extId>`. That is
+// what makes the phone back gesture close it instead of leaving the site, and it
+// makes a stop's board a link someone can send.
+
+const panel = new Panel()
+
+/**
+ * Stops by extId, from stations.json.
+ *
+ * Holds the name so a shared `?stop=` link has a title before its board loads, and
+ * the position so opening a board can take the map there — a panel describing
+ * Alexanderplatz while the map shows Köpenick is just confusing.
+ */
+const stationIndex = new Map<string, {name: string; lat: number; lon: number}>()
+
+type DetailTarget =
+  | {kind: 'vehicle'; id: string}
+  | {kind: 'stop'; id: string; name: string}
+
+let detailTarget: DetailTarget | null = null
+/** Cached journey for the open vehicle, so a poll can re-render without refetching. */
+let detailJourney: JourneyDetail | null = null
+let detailStrip: VehicleView | null = null
+let detailBoard: Departure[] = []
+let detailFetchedAt = 0
+let detailAbort: AbortController | null = null
+
+const urlFor = (t: DetailTarget | null): string => {
+  const base = location.pathname
+  if (!t) return base
+  return t.kind === 'vehicle' ? `${base}?vehicle=${encodeURIComponent(shortId(t.id))}`
+    : `${base}?stop=${encodeURIComponent(t.id)}`
+}
+
+/** Open a target and push it onto history, so Back closes it. */
+function navigate(t: DetailTarget): void {
+  history.pushState({detail: t}, '', urlFor(t))
+  void applyTarget(t)
+}
+
+
+/**
+ * Close the panel.
+ *
+ * Prefer going Back, so the history entry the open panel created is consumed
+ * rather than left behind. With no entry of ours to unwind — someone arrived
+ * straight at `?vehicle=…` — rewrite the URL instead, because `history.back()`
+ * would take them off the site.
+ */
+function closeDetail(): void {
+  if ((history.state as {detail?: unknown} | null)?.detail) history.back()
+  else {
+    history.replaceState(null, '', urlFor(null))
+    clearDetail()
+  }
+}
+
+function clearDetail(): void {
+  detailAbort?.abort()
+  detailAbort = null
+  detailTarget = null
+  detailJourney = null
+  detailStrip = null
+  detailBoard = []
+  panel.hide()
+  setFocusRoute(null)
+  setFocusStop(null)
+}
+panel.onClose = () => closeDetail()
+
+const showVehicle = (id: string): void => navigate({kind: 'vehicle', id})
+const showStop = (id: string, name: string): void =>
+  navigate({kind: 'stop', id, name: name || stationIndex.get(id)?.name || 'Stop'})
+
+/** Render whatever the URL asks for. */
+async function applyTarget(t: DetailTarget | null): Promise<void> {
+  detailAbort?.abort()
+  detailAbort = new AbortController()
+  const signal = detailAbort.signal
+  detailTarget = t
+  detailJourney = null
+  detailStrip = null
+  detailBoard = []
+  detailFetchedAt = 0
+  if (!t) { clearDetail(); return }
+
+  if (t.kind === 'vehicle') {
+    const v = vehicles.find(x => x.id === t.id || shortId(x.id) === shortId(t.id))
+    if (!v) {
+      panel.show({title: 'Vehicle', subtitle: 'not running now', body: noticeBody(
+        'That vehicle is not on the map any more. Journeys end, and a link to one only lasts as long as the journey.', 'empty')})
+      return
+    }
+    // keep the real id, in case we arrived from a short one in the URL
+    detailTarget = {kind: 'vehicle', id: v.id}
+    const bg = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
+    panel.show({
+      title: `${v.line} · ${PRODUCT_LABELS[v.product]}`,
+      subtitle: v.direction ? `to ${v.direction}` : undefined,
+      accent: bg,
+      accentText: textOn(bg),
+      body: noticeBody('Loading the route…', 'loading')
+    })
+    try {
+      const detail = await fetchJourneyDetail(v.id, signal)
+      if (signal.aborted) return
+      detailJourney = detail
+      renderVehicleDetail()?.scrollToVehicle()
+      setFocusRoute(detail?.path ?? null)
+      setFocusStop(null)
+      keepClearOfPanel([v.lon, v.lat])
+    } catch (err) {
+      if (signal.aborted) return
+      panel.updateBody(noticeBody('Could not load the route just now.', 'error'))
+      logError(`journey detail failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return
+  }
+
+  panel.show({
+    title: t.name,
+    subtitle: 'departures',
+    accent: '#37474f',
+    accentText: '#ffffff',
+    body: noticeBody('Loading departures…', 'loading')
+  })
+  setFocusRoute(null)
+  const at = stationIndex.get(t.id)
+  setFocusStop(at ?? null)
+  if (at) {
+    /*
+     * Go to the stop, but do not zoom in past what is useful.
+     *
+     * A board reached from search can be anywhere in the city, and leaving the map
+     * where it was makes the panel look like it belongs to somewhere else. Zoom
+     * only if we are further out than street level; zooming OUT to a fixed level
+     * would throw away a view the user had chosen.
+     */
+    const zoom = Math.max(map.getZoom(), 14)
+    map.easeTo({center: [at.lon, at.lat], zoom, duration: 600})
+    // let the ease finish before deciding whether the panel covers it
+    setTimeout(() => keepClearOfPanel([at.lon, at.lat]), 650)
+  }
+  try {
+    const board = await fetchStationBoard(t.id, 60, 30, signal)
+    if (signal.aborted) return
+    detailBoard = board
+    detailFetchedAt = Date.now()
+    renderStopDetail()
+  } catch (err) {
+    if (signal.aborted) return
+    panel.updateBody(noticeBody('Could not load departures just now.', 'error'))
+    logError(`station board failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** Rebuild the vehicle body from the latest poll. Returns the view, for the caller
+ *  that wants to scroll it into place on first open. */
+function renderVehicleDetail(): VehicleView | null {
+  const t = detailTarget
+  if (t?.kind !== 'vehicle') return null
+  const v = vehicles.find(x => x.id === t.id)
+  if (!v) return null
+  const stops = detailJourney?.stops ?? []
+  const target = markProgress(stops, v.fromStop?.name, v.toStop?.name)
+  detailStrip = vehicleView(v, detailJourney, target, {
+    onStop: (id, name) => navigate({kind: 'stop', id, name})
+  })
+  panel.updateBody(detailStrip.body)
+  updateStripMarker()
+  return detailStrip
+}
+
+function renderStopDetail(): void {
+  if (detailTarget?.kind !== 'stop') return
+  panel.updateBody(stationView(detailBoard, berlinSecondsOfDay(new Date()), {
+    labels: PRODUCT_LABELS,
+    colourFor: d => lineColors[d.line] ?? (d.product ? PRODUCT_COLORS[d.product] : '#666666'),
+    textFor: textOn,
+    onPick: d => {
+      // The board's jid is the same id the radar uses, so a departure that is
+      // already moving opens its journey. One that has not left yet is not on the
+      // map, and there is nothing to show.
+      const onMap = vehicles.find(x => x.id === d.jid)
+      if (onMap) navigate({kind: 'vehicle', id: onMap.id})
+    }
+  }))
+}
+
+/**
+ * Nudge the map so a point is not hidden behind the panel.
+ *
+ * The panel covers the left third of a wide window and most of a phone screen, so
+ * tapping a vehicle near that edge would hide the very thing you tapped. Only
+ * moves when the point is actually behind the panel, and only far enough to clear
+ * it — an unconditional recentre on every tap is disorienting.
+ */
+function keepClearOfPanel(lngLat: [number, number]): void {
+  const box = panel.occupies
+  if (!box) return
+  const pt = map.project(lngLat)
+  const margin = 24
+  let dx = 0
+  let dy = 0
+  if (Panel.isCompact) {
+    // sheet from the bottom: push the point up above its top edge
+    if (pt.y > box.top - margin) dy = pt.y - (box.top - margin)
+  } else {
+    // column on the left: push the point right of its edge
+    if (pt.x < box.right + margin) dx = pt.x - (box.right + margin)
+  }
+  if (dx === 0 && dy === 0) return
+  map.panBy([dx, dy], {duration: 400})
+}
+
+/** Move the strip marker to match the vehicle's progress on the map. */
+function updateStripMarker(): void {
+  if (!detailStrip || detailTarget?.kind !== 'vehicle') return
+  const s = animStates.get(detailTarget.id)
+  detailStrip.setProgress(s && s.total > 0 ? s.drawnAlong / s.total : 0)
+}
+
+/**
+ * The route of the vehicle whose panel is open, drawn on the map.
+ *
+ * HAFAS returns it with the journey detail, so this needs no GTFS geometry — which
+ * matters, because we ship none for bus, ferry, regional or long distance. Drawn
+ * under the debug overlay and over the faint network lines.
+ */
+function setFocusRoute(path: Array<[number, number]> | null): void {
+  const src = map.getSource('focus-route') as {setData(d: unknown): void} | undefined
+  if (!src) return
+  src.setData({
+    type: 'FeatureCollection',
+    features: path && path.length >= 2
+      ? [{type: 'Feature', properties: {}, geometry: {type: 'LineString', coordinates: path.map(([lat, lon]) => [lon, lat])}}]
+      : []
+  })
+}
+
+/** Ring the stop whose board is open, so the panel and the map agree. */
+function setFocusStop(at: {lat: number; lon: number} | null): void {
+  const src = map.getSource('focus-stop') as {setData(d: unknown): void} | undefined
+  if (!src) return
+  src.setData({
+    type: 'FeatureCollection',
+    features: at
+      ? [{type: 'Feature', properties: {}, geometry: {type: 'Point', coordinates: [at.lon, at.lat]}}]
+      : []
+  })
+}
+
+function addFocusRouteLayers(): void {
+  map.addSource('focus-route', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
+  map.addSource('focus-stop', {type: 'geojson', data: {type: 'FeatureCollection', features: []}})
+  map.addLayer({
+    id: 'focus-route-casing',
+    type: 'line',
+    source: 'focus-route',
+    layout: {'line-cap': 'round', 'line-join': 'round'},
+    paint: {'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9}
+  }, belowDebug())
+  map.addLayer({
+    id: 'focus-route-line',
+    type: 'line',
+    source: 'focus-route',
+    layout: {'line-cap': 'round', 'line-join': 'round'},
+    paint: {'line-color': '#1565c0', 'line-width': 3.5, 'line-opacity': 0.95}
+  }, belowDebug())
+  map.addLayer({
+    id: 'focus-stop-ring',
+    type: 'circle',
+    source: 'focus-stop',
+    paint: {
+      'circle-radius': 9,
+      'circle-color': 'rgba(0,0,0,0)',
+      'circle-stroke-color': '#37474f',
+      'circle-stroke-width': 3
+    }
+  }, belowDebug())
+}
+map.on('load', addFocusRouteLayers)
+
+/** Read the URL and show what it names. Runs on first load and on Back/Forward. */
+function applyUrl(): void {
+  const q = new URLSearchParams(location.search)
+  const vehicle = q.get('vehicle')
+  const stop = q.get('stop')
+  if (vehicle) {
+    const v = vehicles.find(x => shortId(x.id) === vehicle || x.id === vehicle)
+    void applyTarget({kind: 'vehicle', id: v?.id ?? vehicle})
+  } else if (stop) {
+    void applyTarget({kind: 'stop', id: stop, name: stationIndex.get(stop)?.name ?? 'Stop'})
+  } else {
+    clearDetail()
+  }
+}
+window.addEventListener('popstate', applyUrl)
+/** The URL is read once vehicles exist, and again on Back/Forward. */
+let urlApplied = false
+
+/*
+ * Keep the open panel current.
+ *
+ * A vehicle panel re-renders on every poll — the delay changes, and the stop it
+ * is approaching moves along the strip — but the stop list itself does not, so
+ * there is no second request. A board re-renders every 5 s to tick its countdowns
+ * down from times it already has, and refetches once a minute for new departures.
+ */
+function refreshDetail(): void {
+  if (detailTarget?.kind === 'vehicle') renderVehicleDetail()
+  else if (detailTarget?.kind === 'stop') {
+    if (Date.now() - detailFetchedAt > 60000) void applyTarget(detailTarget)
+    else renderStopDetail()
+  }
+}
+setInterval(() => { if (panel.isOpen) refreshDetail() }, 5000)
+setInterval(() => { if (panel.isOpen) updateStripMarker() }, 250)
+
+// ─────────── search: stops and lines, as you type ───────────
+//
+// Runs over data already in memory — 672 stations from stations.json and the lines
+// currently running — so there is no request, no debounce and no spinner. Typing
+// and results happen in the same frame.
+//
+// A stop result opens its departure board. A line result narrows the map to that
+// line, which is the thing you wanted if you typed "M10".
+
+const searchBox = document.createElement('div')
+searchBox.id = 'search'
+const searchInput = document.createElement('input')
+searchInput.type = 'search'
+searchInput.id = 'search-input'
+searchInput.placeholder = 'Search a stop or line'
+searchInput.setAttribute('aria-label', 'Search a stop or line')
+searchInput.autocomplete = 'off'
+const searchResults = document.createElement('ul')
+searchResults.id = 'search-results'
+searchResults.setAttribute('role', 'listbox')
+searchResults.hidden = true
+searchBox.append(searchInput, searchResults)
+document.body.append(searchBox)
+
+/** Show only this line, by switching the Line filter to it. */
+function focusLine(hit: {line: string; product: Product; key: string}): void {
+  filters[hit.product] = true
+  lineMode = 'custom'
+  lineFilter = new Set([hit.key])
+  rebuildTypes()
+  rebuildLines()
+  render()
+}
+
+function closeSearch(): void {
+  searchResults.hidden = true
+  searchResults.replaceChildren()
+}
+
+function runSearch(): void {
+  const hits = search(searchInput.value, [...stationIndex].map(([id, v]) => ({id, name: v.name})), liveLines.values())
+  if (hits.length === 0) {
+    if (searchInput.value.trim().length === 0) { closeSearch(); return }
+    searchResults.hidden = false
+    const none = document.createElement('li')
+    none.className = 'search-none'
+    none.textContent = 'Nothing found'
+    searchResults.replaceChildren(none)
+    return
+  }
+  searchResults.hidden = false
+  const rows = hits.map(hit => {
+    const li = document.createElement('li')
+    li.className = 'search-hit'
+    li.setAttribute('role', 'option')
+    li.tabIndex = -1
+    const tag = document.createElement('span')
+    tag.className = 'search-tag'
+    if (hit.kind === 'line') {
+      const bg = lineColors[hit.line] ?? PRODUCT_COLORS[hit.product]
+      tag.style.background = bg
+      tag.style.color = textOn(bg)
+      tag.textContent = hit.line
+      li.append(tag, label(PRODUCT_LABELS[hit.product], 'search-kind'))
+      li.onclick = () => { focusLine(hit); done() }
+    } else {
+      tag.classList.add('is-stop')
+      tag.textContent = '◎'
+      tag.setAttribute('aria-hidden', 'true')
+      li.append(tag, label(hit.name, 'search-name'))
+      li.onclick = () => { showStop(hit.id, hit.name); done() }
+    }
+    return li
+  })
+  searchResults.replaceChildren(...rows)
+
+  function done(): void {
+    searchInput.value = ''
+    searchInput.blur()
+    closeSearch()
+  }
+  function label(text: string, cls: string): HTMLElement {
+    const el = document.createElement('span')
+    el.className = cls
+    el.textContent = text
+    return el
+  }
+}
+
+searchInput.oninput = runSearch
+searchInput.onfocus = () => { if (searchInput.value) runSearch() }
+searchInput.onkeydown = e => {
+  if (e.key === 'Escape') { searchInput.value = ''; closeSearch(); searchInput.blur() }
+  // Enter takes the top hit, which is what a list ranked by relevance is for
+  if (e.key === 'Enter') {
+    const first = searchResults.querySelector('.search-hit') as HTMLElement | null
+    first?.click()
+  }
+}
+// tapping the map dismisses the list, like any other overlay
+map.on('click', closeSearch)
 
 // --- polling with client-side backoff ---
 let nextDelay = POLL_INTERVAL_MS
@@ -692,6 +1168,9 @@ async function poll() {
     conn = 'live'
     // the menus offer exactly what is running, so refresh them from every poll
     updateLiveLines(vehicles)
+    // A `?vehicle=` link can only be resolved once there are vehicles to resolve
+    // it against, so the first poll is the earliest this can run.
+    if (!urlApplied) { urlApplied = true; applyUrl() }
     if (recorder) {
       const drawn = new Map<string, [number, number]>()
       for (const [id, s] of animStates) if (s.renderPos) drawn.set(id, s.renderPos)

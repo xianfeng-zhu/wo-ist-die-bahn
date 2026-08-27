@@ -162,3 +162,221 @@ body.debug .maplibregl-popup-content .pid {
 }
 #filters .multi-body { max-height: none; overflow: visible; }
 #filters .multi-list { max-height: 210px; overflow: auto; }
+
+/* ─────────── detail panel ───────────
+ * Two shapes for one component, because a phone and a laptop want different
+ * things. Narrow: a sheet over the map, which is small anyway. Wide: a docked
+ * column, so the map keeps its context and the width is not wasted.
+ * The breakpoint matches the settings panel's, so "narrow" means one thing.
+ */
+#detail {
+  position: absolute; z-index: 4; background: #fff;
+  display: flex; flex-direction: column;
+  box-shadow: 0 0 24px rgba(0,0,0,.28);
+  /* Slide only; a fade as well reads as sluggish on a phone. */
+  transition: transform .22s ease-out;
+  will-change: transform;
+}
+#detail .detail-head {
+  flex: none; display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 12px;
+}
+#detail .detail-headtext { min-width: 0; flex: 1; }
+#detail .detail-title {
+  margin: 0; font: 700 17px/22px system-ui; letter-spacing: .01em;
+  overflow-wrap: anywhere;
+}
+#detail .detail-sub {
+  margin: 2px 0 0; font: 400 12px/16px system-ui; opacity: .85;
+  overflow-wrap: anywhere;
+}
+#detail .detail-close {
+  flex: none; width: 44px; height: 44px; margin: -8px -6px 0 0;
+  border: 0; background: transparent; color: inherit;
+  font: 400 18px/1 system-ui; cursor: pointer; border-radius: 50%;
+}
+#detail .detail-close:hover { background: rgba(255,255,255,.18); }
+#detail .detail-body {
+  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain; padding: 12px;
+}
+
+/* Wide: a column docked left. */
+@media (min-width: 721px) {
+  #detail {
+    top: 0; bottom: 0; left: 0; width: 380px;
+    transform: translateX(-100%);
+  }
+  #detail.is-open { transform: translateX(0); }
+}
+
+/* Narrow: a sheet from the bottom, stopping short of the top so the map is still
+ * visible above it — the phone-app convention, and it keeps you oriented. */
+@media (max-width: 720px) {
+  #detail {
+    left: 0; right: 0; bottom: 0; max-height: 82vh; height: 82vh;
+    border-radius: 14px 14px 0 0;
+    transform: translateY(100%);
+  }
+  #detail.is-open { transform: translateY(0); }
+  /* a grab bar, so the shape reads as a sheet rather than a stuck dialog */
+  #detail .detail-head::before {
+    content: ''; position: absolute; top: 5px; left: 50%; width: 36px; height: 4px;
+    transform: translateX(-50%); border-radius: 2px; background: rgba(255,255,255,.5);
+  }
+  #detail .detail-head { position: relative; padding-top: 14px; }
+  /* the status bar would sit under a raised sheet; get it out of the way */
+  body.detail-open #statusbar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #detail { transition: none; }
+}
+
+/* ─────────── panel contents ─────────── */
+#detail .notice { color: #666; }
+#detail .notice-loading { color: #888; font-style: italic; }
+#detail .notice p { margin: 6px 0; }
+#detail .vdelay {
+  margin: 0 0 10px; padding: 5px 8px; border-radius: 5px;
+  font: 600 12px/16px system-ui;
+}
+#detail .vdelay.is-late { background: #fdecea; color: #b3261e; }
+#detail .vdelay.is-early { background: #eaf3fd; color: #0b5aa8; }
+#detail .est-note {
+  margin: 14px 0 0; color: #888; font: italic 11px/15px system-ui;
+  border-top: 1px solid #eee; padding-top: 8px;
+}
+
+/*
+ * The journey strip. Stops are spaced EVENLY, like a metro diagram: a regional
+ * line has a few long gaps that would otherwise squash every city stop together.
+ * The rail is drawn on the dot column, and the vehicle floats over it.
+ */
+#detail .strip-wrap { position: relative; }
+#detail .strip { list-style: none; margin: 0; padding: 0; }
+#detail .strip-row {
+  position: relative; display: grid;
+  grid-template-columns: 46px 18px 1fr; align-items: center;
+  gap: 6px; min-height: 34px; padding: 1px 0;
+}
+/* the rail: a continuous line behind the dots */
+#detail .strip-row::before {
+  content: ''; position: absolute; left: 54px; top: 0; bottom: 0;
+  width: 3px; background: #d4d4d4;
+}
+#detail .strip-row:first-child::before { top: 50%; }
+#detail .strip-row:last-child::before { bottom: 50%; }
+#detail .strip-row.is-passed::before { background: #bdbdbd; }
+#detail .strip-time {
+  text-align: right; font: 600 12px/16px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #333; white-space: nowrap;
+}
+#detail .strip-delay { margin-left: 3px; font-style: normal; color: #b3261e; font-size: 10px; }
+#detail .strip-dot {
+  position: relative; z-index: 1; justify-self: center;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: #fff; border: 3px solid #9e9e9e; box-sizing: border-box;
+}
+#detail .strip-name { font: 400 13px/17px system-ui; color: #222; }
+/* Behind the vehicle: quieter, so the eye lands on what is still to come. */
+#detail .strip-row.is-passed .strip-time,
+#detail .strip-row.is-passed .strip-name { color: #9a9a9a; }
+#detail .strip-row.is-passed .strip-dot { border-color: #c9c9c9; }
+/* The stop being approached. */
+#detail .strip-row.is-next .strip-name { font-weight: 700; }
+#detail .strip-row.is-next .strip-dot { border-color: #1565c0; width: 13px; height: 13px; }
+#detail .strip-row.is-cancelled .strip-name { text-decoration: line-through; color: #b3261e; }
+#detail .strip-row.is-tappable { cursor: pointer; border-radius: 4px; }
+#detail .strip-row.is-tappable:hover { background: #f4f6f8; }
+/* The vehicle on the strip: a filled marker on the rail, moving between dots. */
+#detail .strip-vehicle {
+  position: absolute; left: 54px; width: 3px; margin-left: -4.5px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #1565c0; border: 2px solid #fff; box-sizing: content-box;
+  box-shadow: 0 1px 4px rgba(0,0,0,.45);
+  transform: translateY(-50%); transition: top .3s linear; z-index: 2;
+}
+@media (prefers-reduced-motion: reduce) {
+  #detail .strip-vehicle { transition: none; }
+}
+
+/* ─────────── departure board ─────────── */
+#detail .sgroup {
+  margin: 12px 0 4px; color: #666; font: 700 10px/14px system-ui;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+#detail .sgroup:first-child { margin-top: 0; }
+#detail .deps { list-style: none; margin: 0; padding: 0; }
+#detail .dep {
+  display: grid; grid-template-columns: auto 1fr auto auto;
+  align-items: center; gap: 8px;
+  min-height: 44px; padding: 2px 4px; border-bottom: 1px solid #f0f0f0;
+}
+#detail .dep.is-tappable { cursor: pointer; border-radius: 4px; }
+#detail .dep.is-tappable:hover { background: #f4f6f8; }
+#detail .dep-line {
+  min-width: 30px; padding: 2px 6px; border-radius: 10px;
+  font: 700 12px/16px system-ui; text-align: center;
+}
+#detail .dep-dir {
+  font: 400 13px/17px system-ui; color: #222;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#detail .dep-pltf { color: #777; font-size: 11px; }
+#detail .dep-at {
+  font: 600 11px/15px ui-monospace, SFMono-Regular, Menlo, monospace; color: #666;
+  white-space: nowrap;
+}
+#detail .dep-eta {
+  font: 700 13px/17px system-ui; color: #111; white-space: nowrap;
+  min-width: 52px; text-align: right;
+}
+#detail .dep.is-cancelled .dep-dir { text-decoration: line-through; color: #b3261e; }
+#detail .dep.is-cancelled .dep-eta { color: #b3261e; font-size: 11px; }
+
+/* ─────────── search ───────────
+ * Top centre on a wide window, full width on a phone: the one control people
+ * reach for first should not be hidden behind a settings gear.
+ */
+#search {
+  position: fixed; z-index: 1003; top: 10px;
+  left: 50%; transform: translateX(-50%); width: min(420px, calc(100vw - 220px));
+}
+#search-input {
+  width: 100%; box-sizing: border-box; height: 38px; padding: 0 12px;
+  border: 1px solid #bbb; border-radius: 8px; background: rgba(255,255,255,.96);
+  font: 14px system-ui; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+#search-input:focus { outline: 2px solid #1565c0; outline-offset: 1px; }
+#search-results {
+  list-style: none; margin: 6px 0 0; padding: 4px;
+  max-height: min(50vh, 340px); overflow-y: auto;
+  background: #fff; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.28);
+}
+#search-results .search-hit {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
+}
+#search-results .search-hit:hover { background: #eef2f6; }
+#search-results .search-tag {
+  flex: none; min-width: 30px; padding: 2px 6px; border-radius: 10px;
+  font: 700 12px/16px system-ui; text-align: center;
+}
+#search-results .search-tag.is-stop {
+  background: transparent; color: #607d8b; font-size: 15px; min-width: 22px;
+}
+#search-results .search-name, #search-results .search-kind {
+  font: 400 13px/17px system-ui; color: #222;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#search-results .search-kind { color: #666; }
+#search-results .search-none { padding: 10px 8px; color: #888; font-style: italic; }
+
+@media (max-width: 720px) {
+  /* the phone has no room for a centred box beside the status bar and gear */
+  #search { top: 8px; left: 8px; right: 56px; transform: none; width: auto; }
+  /* the status bar would collide with it; it is only a warning strip now anyway */
+  #statusbar { top: 54px; }
+  body.detail-open #search { display: none; }
+}
