@@ -4,6 +4,7 @@ import './style.css'
 import {fetchAllVehicles, BBox, JNY_CAP} from './hci.js'
 import {compareLineNames, filterVehicles, Forecast, lineKey, LineSighting, Product, recordLineSightings, shortId, StopRef, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
+import {textOn} from './contrast.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
@@ -71,7 +72,7 @@ const PRODUCT_COLORS: Record<Product, string> = {
   tram: '#c62828',
   bus: '#a5027d',
   ferry: '#009bd5',
-  express: '#37474f',
+  express: '#7d8185', // the grey VBB's own maps use for ICE/IC; we had invented one
   regional: '#5e5e5d'
 }
 
@@ -225,7 +226,11 @@ setInterval(updateStatus, 1000)
 function badgeElement(v: Vehicle): HTMLElement {
   const el = document.createElement('div')
   el.className = 'veh'
-  el.style.background = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
+  const bg = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
+  el.style.background = bg
+  // Not always white: 47 of the 89 colours the app ships fail WCAG 4.5:1 against
+  // white text, and U4's yellow scored 1.45:1 — a badge you could not read.
+  el.style.color = textOn(bg)
   el.textContent = v.line
   // debugging handles: the full jid for headless queries, the short id on hover
   el.dataset.vehicleId = v.id
