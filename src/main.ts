@@ -979,10 +979,16 @@ toggleLayer('stations-layer', 'Stations', true, filterEl)
 // Four separate switches were confusing, and the network layers had none at all
 // because their code sat commented out. Everything for testing now lives behind
 // this one control: target dots, animated paths, vehicle IDs, the error panel and
-// the motion recorder. Off by default so the map looks finished; the setting is
-// remembered, and `?debug=1` forces it on.
+// the motion recorder.
+//
+// The site is published, so a visitor should never meet these controls. They are
+// added to the panel only in a DEV build, or when `?debug=1` asks for them — the
+// hatch that lets the built site be diagnosed without shipping a test switch to
+// everybody.
 const DEBUG_KEY = 'liveberlin.debug'
 const debugRequested = new URLSearchParams(location.search).has('debug')
+/** Are the debug controls on screen at all? */
+const DEBUG_AVAILABLE = import.meta.env.DEV || debugRequested
 const debugGroup = document.createElement('div')
 debugGroup.id = 'debug-group'
 
@@ -990,9 +996,12 @@ const debugLabel = document.createElement('label')
 debugLabel.className = 'layer'
 const debugCb = document.createElement('input')
 debugCb.type = 'checkbox'
-debugCb.checked = debugRequested || localStorage.getItem(DEBUG_KEY) === '1'
+// The remembered setting only counts when the switch is on screen. Otherwise a
+// visitor who ticked the box once — back when the published site offered it —
+// would keep the overlay for good, with nothing to turn it off with.
+debugCb.checked = DEBUG_AVAILABLE && (debugRequested || localStorage.getItem(DEBUG_KEY) === '1')
 debugLabel.append(debugCb, ' Debug view')
-filterEl.append(debugLabel, debugGroup)
+if (DEBUG_AVAILABLE) filterEl.append(debugLabel, debugGroup)
 
 // Targets: next-stop dots + animated segment paths. Not built with toggleLayer,
 // because these three layers depend on the Debug switch as well as their own box.
@@ -1028,7 +1037,8 @@ function applyDebug() {
   document.body.classList.toggle('debug', on)
   document.body.classList.toggle('show-vids', on && idsCb.checked)
   applyTargets()
-  localStorage.setItem(DEBUG_KEY, on ? '1' : '0')
+  // do not overwrite a developer's preference from a build that cannot show it
+  if (DEBUG_AVAILABLE) localStorage.setItem(DEBUG_KEY, on ? '1' : '0')
 }
 debugCb.onchange = applyDebug
 idsCb.onchange = applyDebug

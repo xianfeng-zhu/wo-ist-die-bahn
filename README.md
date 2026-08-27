@@ -91,7 +91,9 @@ traffic, point `src/main.ts` at your own tile source.
 
 Watching the map is unreliable, so movement is measured instead:
 
-1. Open the app, tick **Debug view**, then tick **Record motion**.
+1. Open the app with `npm run dev` (or add `?debug=1` to the built site — the
+   debug controls are not shown to visitors), tick **Debug view**, then tick
+   **Record motion**.
 2. Leave it running. 15 minutes is plenty; longer catches rarer faults.
 3. Click **Save log** — the browser downloads an `.ndjson` file.
 4. `node scripts/analyse-motion.mjs <file> [--vehicle 75416-24]`
