@@ -87,6 +87,32 @@ The map tiles come from the OpenStreetMap Foundation's servers, which are
 donation funded and carry no availability guarantee. If your fork attracts real
 traffic, point `src/main.ts` at your own tile source.
 
+## How accurate is a vehicle's position?
+
+Less than the map suggests, and the limit is the data, not the drawing.
+
+**VBB publishes no measured positions.** Every dot is computed from the timetable
+and the live delay. Checked three ways: asking the endpoint for reported positions
+only (`trainPosMode: 'REPORT_ONLY'`) returns zero vehicles across all seven modes;
+the official VBB GTFS-Realtime feed carries 7,232 trip updates and no vehicle
+positions; and the endpoint's own 30-second forecast agrees with the position it
+later calculates to a median of 7 m, which a feed fed by real telemetry would not.
+
+**Every stop time in the feed is a whole minute** — 1,762 of 1,762 checked — and
+tram stops are 1 to 3 minutes apart. So between two stops the position comes from
+two numbers: leave at minute X, arrive at minute Y. The rounding alone is ±30
+seconds, which at tram speed is ±200 m, before the real vehicle's own accelerating
+and waiting at red lights.
+
+**What that means in practice.** The map is dependable at stops, and the delay
+figures are real. Mid-segment, expect the dot to be a block or two from the
+vehicle you can see. Each popup says so.
+
+**What is not the cause.** Measured for M10 and tram 12 over 259 s: the drawn
+position tracks the reported one to a median of 3 m, and the forecast sits a
+median 2.8 m from the chosen track across 145 live trams. The app follows the
+right street; it cannot know how far along it the tram really is.
+
 ## Checking vehicle movement
 
 Watching the map is unreliable, so movement is measured instead:

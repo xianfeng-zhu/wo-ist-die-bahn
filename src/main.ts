@@ -214,6 +214,20 @@ function popupHtml(v: Vehicle): string {
     (v.delayMs != null
       ? `<br><span style="color:${v.delayMs >= 300000 ? '#c62828' : '#333'}">delay: ${Math.round(v.delayMs / 60000)} min</span>`
       : '') +
+    /*
+     * Say where the position comes from.
+     *
+     * VBB publishes no measured positions: `trainPosMode: 'REPORT_ONLY'` returns
+     * zero vehicles for all seven modes, and the official GTFS-RT feed carries
+     * 7,232 trip updates and no vehicle positions at all. Every dot is computed
+     * from the timetable and the live delay, and every stop time in the feed is a
+     * whole minute (1,762 of 1,762 checked), with tram stops 1-3 minutes apart.
+     * So between two stops the position is an interpolation between two
+     * minute-rounded anchors, and it can be a couple of hundred metres from the
+     * vehicle you can see out of the window. Better to say so than to let the map
+     * imply a precision it does not have.
+     */
+    `<br><span class="est">estimated from timetable + delay, not GPS</span>` +
     `<br><span class="pid">id: <b>${shortId(v.id)}</b><br>${v.id}</span>`
   )
 }
