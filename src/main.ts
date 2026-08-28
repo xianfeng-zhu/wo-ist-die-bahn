@@ -174,9 +174,10 @@ map.on('zoom', applyZoomClass)
 applyZoomClass()
 
 map.on('moveend', () => {
-  // Following moves the map every frame; persisting that would hammer localStorage
-  // and store a position the user never chose.
-  if (followSelected) return
+  // Save where the USER put the map, never where auto-pan put it. A gesture during
+  // an open panel is still a choice, so the test is "was this move ours", not "is a
+  // panel open".
+  if (recentring) return
   const c = map.getCenter()
   try {
     localStorage.setItem(VIEW_KEY, JSON.stringify({lng: c.lng, lat: c.lat, zoom: map.getZoom()}))
@@ -762,7 +763,6 @@ let detailTarget: DetailTarget | null = null
 let detailJourney: JourneyDetail | null = null
 let detailStrip: VehicleView | null = null
 let detailBoard: Departure[] = []
-let detailFetchedAt = 0
 let detailAbort: AbortController | null = null
 
 const urlFor = (t: DetailTarget | null): string => {
@@ -819,6 +819,7 @@ function clearDetail(): void {
   detailBoard = []
   navDepth = 0
   followSelected = false
+  recentring = false
   setSelectedVehicle(null)
   panel.hide()
   setFocusRoute(null)
@@ -840,7 +841,6 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
   detailJourney = null
   detailStrip = null
   detailBoard = []
-  detailFetchedAt = 0
   if (!t) { clearDetail(); return }
 
   if (t.kind === 'vehicle') {
@@ -872,7 +872,7 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
       // Glide there once, then follow. Snapping straight into follow mode makes the
       // opening feel like a fault rather than a move.
       const drawn = animStates.get(v.id)?.renderPos
-      centreOnVisible(drawn ? [drawn[1], drawn[0]] : [v.lon, v.lat], 600)
+      autoPan(drawn ? [drawn[1], drawn[0]] : [v.lon, v.lat], 600)
       setTimeout(() => { if (detailTarget?.kind === 'vehicle') followSelected = true }, 650)
     } catch (err) {
       if (signal.aborted) return
@@ -913,7 +913,6 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
     const board = await fetchStationBoard(t.id, 60, 30, signal)
     if (signal.aborted) return
     detailBoard = board
-    detailFetchedAt = Date.now()
     renderStopDetail()
   } catch (err) {
     if (signal.aborted) return
@@ -1008,9 +1007,12 @@ let selectedVehicleId: string | null = null
  * window, everything below ~150 px on a phone. The container centre would park the
  * vehicle underneath the panel.
  *
- * A drag or a pinch releases it. Following that ignored the user would make the
- * map impossible to look around while a panel was open, which is worse than the
- * problem it solves.
+ * Your own gestures SUSPEND this, they do not switch it off. An earlier version
+ * released it for good on any gesture, which broke the ordinary case: zoom in for a
+ * closer look at the vehicle you are watching, and the map stopped bringing it back
+ * for the rest of the panel's life. So while you are touching the map nothing
+ * moves, and a moment after you stop, the vehicle is brought back if it has left
+ * the view or slipped behind the panel.
  */
 let followSelected = false
 
@@ -1018,8 +1020,56 @@ let followSelected = false
 const KEEP_IN_MARGIN_PX = 72
 /** Length of the one catch-up glide. Long enough to read as a move, not a jump. */
 const RECENTRE_MS = 700
-/** True while our own catch-up glide is running, so it is not restarted mid-flight. */
+/** Quiet time after a gesture before auto-pan takes over again. */
+const SETTLE_MS = 500
+/** True while our OWN camera move is running: it must not restart or be saved. */
 let recentring = false
+
+// Gesture tracking, for "is the user busy with the map right now?".
+//
+// Read from the events that carry an `originalEvent` — a gesture always has one and
+// our own `easeTo` never does. `pointerdown` is tracked as well, because a finger
+// held still on the map is still a hand on the wheel, and it fires no move events.
+let gestureAt = 0
+let pointerDown = false
+const noteGesture = (): void => { gestureAt = Date.now() }
+/**
+ * The hand is off the map. Listened for in four ways on purpose — a button released
+ * outside the window fires no `pointerup`, and a `pointerDown` left stuck true would
+ * suspend auto-pan for good.
+ */
+const endPointer = (): void => { pointerDown = false; noteGesture() }
+const mapPad = map.getCanvasContainer()
+mapPad.addEventListener('pointerdown', () => { pointerDown = true; noteGesture() })
+mapPad.addEventListener('wheel', noteGesture, {passive: true})
+addEventListener('pointerup', endPointer)
+addEventListener('pointercancel', endPointer)
+addEventListener('blur', endPointer)
+map.on('dragend', endPointer)
+for (const ev of ['movestart', 'move', 'zoom', 'rotate', 'pitch'] as const) {
+  map.on(ev, e => { if ((e as {originalEvent?: unknown}).originalEvent) noteGesture() })
+}
+
+/** True while the user is working the map, or has only just stopped. */
+function userIsBusy(): boolean {
+  return pointerDown || Date.now() - gestureAt < SETTLE_MS
+}
+
+/**
+ * Move the camera ourselves, flagged as ours.
+ *
+ * The flag does two jobs: it stops the keep-in check restarting the glide on every
+ * frame while it runs, and it keeps the move out of the saved view, which is meant
+ * to hold a position the user chose. The timeout is a backstop — if a `moveend`
+ * were ever missed, the flag would stick and auto-pan would be dead for good.
+ */
+function autoPan(lngLat: [number, number], duration: number): void {
+  recentring = true
+  const clear = () => { recentring = false }
+  map.once('moveend', clear)
+  setTimeout(clear, duration + 400)
+  centreOnVisible(lngLat, duration)
+}
 
 /** The map you can actually see: the container minus whatever the panel covers. */
 function visibleRect(): {left: number; top: number; right: number; bottom: number} {
@@ -1047,25 +1097,21 @@ function centreOnVisible(lngLat: [number, number], duration = 0): void {
  * The margin is capped against the box, because on a phone the uncovered strip can
  * be shorter than twice the margin — with a fixed 72 px there the test would never
  * pass and the map would glide without end.
+ *
+ * Three reasons to do nothing: our own glide is already running, the user is working
+ * the map, or the camera is still coasting from a flick. Cutting into that last one
+ * feels like the app grabbing the map out of your hand.
  */
 function keepVehicleInView(lngLat: [number, number]): void {
-  if (recentring) return
+  if (recentring || userIsBusy() || map.isMoving()) return
   const r = visibleRect()
   const m = Math.min(KEEP_IN_MARGIN_PX, (r.right - r.left) / 4, (r.bottom - r.top) / 4)
   const p = map.project(lngLat)
   const inside = p.x > r.left + m && p.x < r.right - m && p.y > r.top + m && p.y < r.bottom - m
   if (inside) return
-  recentring = true
-  // A user gesture during the glide fires moveend too, and releases follow itself.
-  map.once('moveend', () => { recentring = false })
-  centreOnVisible(lngLat, RECENTRE_MS)
+  autoPan(lngLat, RECENTRE_MS)
 }
 
-// A user gesture always wins. Programmatic moves carry no originalEvent, so this
-// does not fire on our own following.
-map.on('movestart', e => {
-  if ((e as {originalEvent?: unknown}).originalEvent) followSelected = false
-})
 
 /**
  * Pick the selected vehicle out of the crowd.
@@ -1187,31 +1233,37 @@ let urlApplied = false
 /*
  * Keep the open panel current.
  *
- * A vehicle panel re-renders on every poll — the delay changes, and the stop it is
- * approaching moves along the strip — but the stop list itself does not, so there
- * is no second request.
- *
- * A board has two clocks. Every 5 s it re-renders to tick its countdowns down from
- * times it already holds. Every 30 s it fetches the board again, because a delay
- * that grows, a cancellation, or a departure due later than the last look are all
- * new facts that no amount of counting down can produce.
+ * One data clock for the whole app: the poll. Whatever it brings back, the open
+ * panel takes. Nothing here runs a refresh interval of its own.
  */
-const BOARD_REFETCH_MS = 30000
 let boardRefetching = false
 
 /**
  * Fetch the open board again and swap in the new times, quietly.
  *
- * Quietly is the point, and it is why this is not `applyTarget`. That call rebuilds
- * the whole panel: it shows "Loading departures…" over a board you were reading, it
- * throws the scroll position back to the top, and it eases the map to the stop
- * again. Doing that every 30 s makes a live board unusable. `panel.updateBody`
- * keeps the header and the scroll position, so the only thing that changes is the
- * times.
+ * Why a board needs its own request when the poll data is right there: the poll is
+ * `JourneyGeoPos`, and it answers "what is moving in this box right now". A board
+ * answers "what will call at this stop in the next hour". The poll cannot produce
+ * the second answer, for two reasons that are in the data, not in our code:
+ *
+ *   - It carries FOUR stopovers per vehicle, not the whole journey. A train twenty
+ *     minutes from this stop does not name this stop anywhere in its poll entry.
+ *   - It only returns vehicles that have a position now. Anything yet to leave its
+ *     origin is simply absent, and so is anything outside our box or past the
+ *     1,000-journey cap. That is most of the second half of any board.
+ *
+ * So this is one small request beside the poll's three, and only while a board is
+ * open. Everything else in the panel is drawn from data we already hold.
+ *
+ * Quietly is the other point, and it is why this is not `applyTarget`. That call
+ * rebuilds the whole panel: it shows "Loading departures…" over a board you were
+ * reading, throws the scroll position back to the top, and eases the map to the stop
+ * again. `panel.updateBody` keeps the header and the scroll position, so the only
+ * thing that changes is the times.
  *
  * A failed refetch leaves the old board on screen. Stale times that keep counting
- * down are more use to someone waiting than an error page, and the next try is
- * 30 s away.
+ * down are more use to someone waiting than an error page, and the next poll is
+ * seconds away.
  */
 async function refetchBoard(): Promise<void> {
   const t = detailTarget
@@ -1223,7 +1275,6 @@ async function refetchBoard(): Promise<void> {
     // the user may have moved on while this was in the air
     if (signal?.aborted || detailTarget?.kind !== 'stop' || detailTarget.id !== t.id) return
     detailBoard = board
-    detailFetchedAt = Date.now()
     renderStopDetail()
   } catch (err) {
     if (signal?.aborted) return
@@ -1233,12 +1284,31 @@ async function refetchBoard(): Promise<void> {
   }
 }
 
+/**
+ * Redraw the open panel from data already in hand. No requests.
+ *
+ * This is a clock, not a data source: it exists so a countdown reading "3 min" turns
+ * into "2 min" between polls.
+ */
 function refreshDetail(): void {
   if (detailTarget?.kind === 'vehicle') renderVehicleDetail()
-  else if (detailTarget?.kind === 'stop') {
-    renderStopDetail()
-    if (Date.now() - detailFetchedAt > BOARD_REFETCH_MS) void refetchBoard()
-  }
+  else if (detailTarget?.kind === 'stop') renderStopDetail()
+}
+
+/**
+ * New data has arrived from the poll. Take it into the open panel.
+ *
+ * The poll is the app's single heartbeat, and the panel rides it instead of running
+ * a refresh clock of its own.
+ *
+ * A vehicle panel needs nothing more: the poll already carries its position and its
+ * delay, and its stop list does not change. A board does need its own request, and
+ * this is the one place where that is unavoidable — see `refetchBoard`.
+ */
+function onFreshData(): void {
+  if (!panel.isOpen) return
+  if (detailTarget?.kind === 'stop') void refetchBoard()
+  else refreshDetail()
 }
 setInterval(() => { if (panel.isOpen) refreshDetail() }, 5000)
 setInterval(() => { if (panel.isOpen) updateStripMarker() }, 250)
@@ -1454,6 +1524,8 @@ async function poll() {
       recorder.poll(drawn, new Map(vehicles.map(v => [v.id, [v.lat, v.lon] as [number, number]])))
     }
     render()
+    // The panel has no clock of its own: new data reaches it from here.
+    onFreshData()
   } catch (err) {
     failures++
     // one hiccup is stale data, not an outage; say so honestly

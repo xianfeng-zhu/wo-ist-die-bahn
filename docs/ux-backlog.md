@@ -148,7 +148,26 @@ Second follow-up, after using it again:
   slid the whole city the entire time a panel was open. The map now holds still
   and moves once, when the vehicle is about to leave the part of the map you can
   see. Measured: no movement at all for 15 s, then one 700 ms glide.
-- A departure board now fetches again every 30 s and swaps the new times in
-  without a loading message, without losing your place in the list, and without
-  moving the map. Before this it went through the full panel rebuild once a
-  minute, which did all three.
+- A departure board now fetches again and swaps the new times in without a
+  loading message, without losing your place in the list, and without moving the
+  map. Before this it went through the full panel rebuild once a minute, which
+  did all three.
+
+Third follow-up, from testing on the published site:
+
+- A gesture used to switch following off for good. That broke the ordinary case:
+  zoom in for a closer look at the vehicle you are watching, and the map never
+  brought it back again. A gesture now only pauses it. While your hand is on the
+  map nothing moves; half a second after you stop, the vehicle is brought back
+  if it has left the view or slipped behind the panel. The zoom you chose is
+  kept.
+- The board no longer keeps a clock of its own. The poll is the app's one
+  heartbeat, and the open panel takes whatever it brings back.
+
+  A board still needs its own small request, and it is worth writing down why,
+  because the question comes up. The poll answers "what is moving right now". A
+  board answers "what will call here in the next hour". The poll cannot answer
+  the second: it carries only four stopovers per vehicle, so a train twenty
+  minutes away never names your stop, and it returns only vehicles that have a
+  position, so everything yet to leave its origin is missing. That is most of
+  the second half of any board.
