@@ -78,9 +78,10 @@ area on coarse pointers. The care was taken once and not carried into the panel.
   span is now `aria-hidden`, and the badge carries a real `aria-label`.
 - ~~The badge is focusable but has no `role`~~ — fixed, it is a `button` and
   responds to Enter and Space.
-- Still open: the filter list and the departure rows have no keyboard focus
-  outline of their own beyond the browser default, and the panel does not trap or
-  restore focus when it opens and closes.
+- **Dropped on 2026-08-28: keyboard control is out of scope, by the user's
+  decision.** That covers the missing focus outlines on the filter list and the
+  departure rows, the panel not trapping or restoring focus, and focus being lost
+  when a departure board redraws every 5 s. Do not raise these again.
 
 Focus rings were checked with a real Tab press and are **fine**
 (`outline: auto`, `:focus-visible` matches). Not a defect.
