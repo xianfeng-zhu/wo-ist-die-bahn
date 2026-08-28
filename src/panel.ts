@@ -30,6 +30,18 @@ export interface PanelContent {
   body: HTMLElement
   /** Show the Back control — there is a previous panel of ours to return to. */
   canGoBack?: boolean
+  /**
+   * How much of a phone screen the sheet may take. Ignored on a wide window, where
+   * the panel is a full-height column and its width is what matters.
+   *
+   * `'tall'` suits a list you read on its own, like a departure board — you want as
+   * many rows at once as possible, and the map is not part of the answer.
+   *
+   * `'short'` suits content that is ABOUT something on the map. A vehicle's journey
+   * is only half the story; the other half is where the vehicle is, and a sheet over
+   * four fifths of a phone left too little map to see it in.
+   */
+  size?: 'tall' | 'short'
 }
 
 const COMPACT_MAX_WIDTH = 720
@@ -135,6 +147,7 @@ export class Panel {
     this.closeBtn.style.color = content.accentText ?? '#ffffff'
     this.backBtn.style.color = content.accentText ?? '#ffffff'
     this.backBtn.hidden = !content.canGoBack
+    this.root.classList.toggle('is-short', content.size === 'short')
     this.bodyEl.replaceChildren(content.body)
     this.bodyEl.scrollTop = 0
     this.root.setAttribute('aria-label', content.title)

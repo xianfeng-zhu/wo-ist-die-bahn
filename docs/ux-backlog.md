@@ -164,6 +164,10 @@ Third follow-up, from testing on the published site:
   kept.
 - The board no longer keeps a clock of its own. The poll is the app's one
   heartbeat, and the open panel takes whatever it brings back.
+- A vehicle sheet on a phone took four fifths of the screen, which left 152 px of
+  map — too little to see the vehicle the sheet was about. It now takes half,
+  giving 422 px of map and still showing 9 of 22 stops at once. A departure board
+  keeps the full height, because there the map is not part of the answer.
 
   A board still needs its own small request, and it is worth writing down why,
   because the question comes up. The poll answers "what is moving right now". A

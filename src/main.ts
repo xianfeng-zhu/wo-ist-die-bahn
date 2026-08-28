@@ -846,7 +846,7 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
   if (t.kind === 'vehicle') {
     const v = vehicles.find(x => x.id === t.id || shortId(x.id) === shortId(t.id))
     if (!v) {
-      panel.show({title: 'Vehicle', subtitle: 'not running now', canGoBack: depthOf() > 1, body: noticeBody(
+      panel.show({title: 'Vehicle', subtitle: 'not running now', canGoBack: depthOf() > 1, size: 'short', body: noticeBody(
         'That vehicle is not on the map any more. Journeys end, and a link to one only lasts as long as the journey.', 'empty')})
       return
     }
@@ -859,6 +859,9 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
       accent: bg,
       accentText: textOn(bg),
       canGoBack: depthOf() > 1,
+      // Half the phone screen, so the map keeps enough room to show the vehicle
+      // this panel is about. A board takes the full height; see PanelContent.size.
+      size: 'short',
       body: noticeBody('Loading the route…', 'loading')
     })
     setSelectedVehicle(v.id)

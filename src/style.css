@@ -218,6 +218,18 @@ body.debug .maplibregl-popup-content .pid {
     border-radius: 14px 14px 0 0;
     transform: translateY(100%);
   }
+  /*
+   * A vehicle's sheet takes half the screen, not four fifths.
+   *
+   * At 82vh a 390x844 phone was left with 152 px of map — not enough to see the
+   * vehicle the sheet is about, which defeats the point of a live map. Half gives
+   * 422 px of map and still shows about eight stops of the journey at once, which is
+   * more than anyone reads without scrolling.
+   *
+   * A departure board keeps the full height: it is a list you read on its own, and
+   * there the map is not part of the answer.
+   */
+  #detail.is-short { max-height: 50vh; height: 50vh; }
   #detail.is-open { transform: translateY(0); }
   /* a grab bar, so the shape reads as a sheet rather than a stuck dialog */
   #detail .detail-head::before {
