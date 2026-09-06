@@ -177,6 +177,9 @@ body.debug .maplibregl-popup-content .pid {
   transition: transform .22s ease-out;
   will-change: transform;
 }
+/* The `hidden` attribute is overridden by `display: flex` above, so state it
+   explicitly — otherwise a closed sheet stays in the tree, slid just off-screen. */
+#detail[hidden] { display: none; }
 #detail .detail-head {
   flex: none; display: flex; align-items: flex-start; gap: 8px;
   padding: 10px 12px;
