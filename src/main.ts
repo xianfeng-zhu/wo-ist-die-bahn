@@ -9,7 +9,7 @@ import {fetchJourneyDetail, fetchStationBoard} from './hci.js'
 import {markProgress, type JourneyDetail, type StationBoardPage} from './journey.js'
 import {berlinSecondsOfDay} from './format.js'
 import {Panel} from './panel.js'
-import {noticeBody, stationView, vehicleView, type VehicleView} from './views.js'
+import {arrivalSummary, noticeBody, stationView, vehicleView, type VehicleView} from './views.js'
 import {search} from './search.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
@@ -855,6 +855,16 @@ const showVehicle = (id: string): void => navigate({kind: 'vehicle', id})
 const showStop = (id: string, name: string): void =>
   navigate({kind: 'stop', id, name: name || stationIndex.get(id)?.name || 'Stop'})
 
+/** The fixed header line for a vehicle: next stop and arrival time. */
+const vehicleHeaderSummary = (v: Vehicle): string | null => {
+  const s = arrivalSummary(v, berlinSecondsOfDay(new Date()))
+  const bits: string[] = []
+  if (s.next) bits.push(`Next: ${s.next}`)
+  const meta = [s.time, s.eta].filter((x): x is string => x != null).join(' · ')
+  if (meta) bits.push(meta)
+  return bits.length > 0 ? bits.join(' · ') : null
+}
+
 /** Render whatever the URL asks for. */
 async function applyTarget(t: DetailTarget | null): Promise<void> {
   detailAbort?.abort()
@@ -879,6 +889,7 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
     panel.show({
       title: `${v.line} · ${PRODUCT_LABELS[v.product]}`,
       subtitle: v.direction ? `to ${v.direction}` : undefined,
+      summary: vehicleHeaderSummary(v),
       accent: bg,
       accentText: textOn(bg),
       canGoBack: depthOf() > 1,
@@ -956,12 +967,14 @@ function renderVehicleDetail(): VehicleView | null {
   if (!v) {
     // The journey ended, or the vehicle left the box, while its panel was open.
     // Saying so beats leaving times on screen that have stopped meaning anything.
+    panel.setSummary(null)
     panel.updateBody(noticeBody('This journey has finished, so there is nothing left to follow.', 'empty'))
     setSelectedVehicle(null)
     setFocusRoute(null)
     detailStrip = null
     return null
   }
+  panel.setSummary(vehicleHeaderSummary(v))
   const stops = detailJourney?.stops ?? []
   const target = markProgress(stops, v.fromStop?.name, v.toStop?.name)
   detailStrip = vehicleView(v, detailJourney, target, {

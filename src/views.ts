@@ -4,7 +4,7 @@
 // so the panel can be re-rendered from a fresh poll without the caller
 // untangling what changed.
 
-import {berlinSecondsOfDay, clockTime, delayLabel, etaLabel, minutesUntil} from './format.js'
+import {clockTime, delayLabel, etaLabel, minutesUntil} from './format.js'
 import type {Departure, JourneyDetail, StationNotice} from './journey.js'
 import type {Product, Vehicle} from './vehicle.js'
 
@@ -70,15 +70,6 @@ export function vehicleView(
   opts: {onStop?: (stopId: string, name: string) => void} = {}
 ): VehicleView {
   const body = el('div', 'vdetail')
-
-  const arrival = arrivalSummary(v, berlinSecondsOfDay(new Date()))
-  if (arrival.next || arrival.time || arrival.eta) {
-    const summary = el('div', 'vsummary')
-    if (arrival.next) summary.append(el('p', 'vsummary-next', `Next: ${arrival.next}`))
-    const meta = [arrival.time, arrival.eta].filter((x): x is string => x != null)
-    if (meta.length > 0) summary.append(el('p', 'vsummary-meta', meta.join(' · ')))
-    body.append(summary)
-  }
 
   const delay = delayLabel(v.delayMs)
   if (delay) {

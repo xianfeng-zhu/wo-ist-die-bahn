@@ -22,6 +22,12 @@ export interface PanelContent {
   title: string
   /** Quieter line under it — a destination, a mode. */
   subtitle?: string
+  /**
+   * A second, fixed header line that stays visible when the body scrolls. Used
+   * for the vehicle's next stop and arrival time, the one thing a rider wants
+   * to keep in view while reading the rest of the journey.
+   */
+  summary?: string | null
   /** Colour of the header strip. Usually the line colour. */
   accent?: string
   /** Text colour to use on `accent`. */
@@ -51,6 +57,7 @@ export class Panel {
   private readonly header: HTMLElement
   private readonly titleEl: HTMLElement
   private readonly subtitleEl: HTMLElement
+  private readonly summaryEl: HTMLElement
   private readonly bodyEl: HTMLElement
   private readonly closeBtn: HTMLButtonElement
   private readonly backBtn: HTMLButtonElement
@@ -78,7 +85,9 @@ export class Panel {
     this.titleEl.className = 'detail-title'
     this.subtitleEl = document.createElement('p')
     this.subtitleEl.className = 'detail-sub'
-    text.append(this.titleEl, this.subtitleEl)
+    this.summaryEl = document.createElement('p')
+    this.summaryEl.className = 'detail-summary'
+    text.append(this.titleEl, this.subtitleEl, this.summaryEl)
 
     /*
      * Back AND close, on both layouts.
@@ -141,6 +150,8 @@ export class Panel {
     this.titleEl.textContent = content.title
     this.subtitleEl.textContent = content.subtitle ?? ''
     this.subtitleEl.hidden = !content.subtitle
+    this.summaryEl.textContent = content.summary ?? ''
+    this.summaryEl.hidden = !content.summary
     const accent = content.accent ?? '#333333'
     this.header.style.background = accent
     this.header.style.color = content.accentText ?? '#ffffff'
@@ -165,6 +176,12 @@ export class Panel {
     const top = this.bodyEl.scrollTop
     this.bodyEl.replaceChildren(body)
     this.bodyEl.scrollTop = top
+  }
+
+  /** Replace only the fixed summary line, without rebuilding the body. */
+  setSummary(text: string | null): void {
+    this.summaryEl.textContent = text ?? ''
+    this.summaryEl.hidden = !text
   }
 
   /** The scrolling element, for content that wants to position itself in it. */

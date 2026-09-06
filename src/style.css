@@ -190,6 +190,10 @@ body.debug .maplibregl-popup-content .pid {
   margin: 2px 0 0; font: 400 12px/16px system-ui; opacity: .85;
   overflow-wrap: anywhere;
 }
+#detail .detail-summary {
+  margin: 3px 0 0; font: 600 13px/17px system-ui; opacity: .95;
+  overflow-wrap: anywhere;
+}
 #detail .detail-close {
   flex: none; width: 44px; height: 44px; margin: -8px -6px 0 0;
   border: 0; background: transparent; color: inherit;
@@ -255,16 +259,6 @@ body.debug .maplibregl-popup-content .pid {
 }
 #detail .vdelay.is-late { background: #fdecea; color: #b3261e; }
 #detail .vdelay.is-early { background: #eaf3fd; color: #0b5aa8; }
-/* The next stop and arrival time, the first thing a rider reads. */
-#detail .vsummary { margin: 0 0 10px; }
-#detail .vsummary p { margin: 0; }
-#detail .vsummary-next {
-  font: 700 15px/20px system-ui; color: #111;
-  overflow-wrap: anywhere;
-}
-#detail .vsummary-meta {
-  margin-top: 2px !important; font: 600 13px/18px system-ui; color: #444;
-}
 #detail .est-note {
   margin: 14px 0 0; color: #888; font: italic 11px/15px system-ui;
   border-top: 1px solid #eee; padding-top: 8px;
