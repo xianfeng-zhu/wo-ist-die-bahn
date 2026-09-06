@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest'
-import {ALL_PRODUCTS, berlinDateTime, buildRadarBody, JNY_CAP, parseRadar, parseRadarPage, PRODUCT_GROUPS} from './hci.js'
+import {ALL_PRODUCTS, berlinDateTime, buildRadarBody, groupsFor, JNY_CAP, parseRadar, parseRadarPage, PRODUCT_GROUPS} from './hci.js'
+import type {Filters} from './vehicle.js'
 
 describe('berlinDateTime', () => {
   it('converts a UTC instant to Europe/Berlin wall-clock (summer, UTC+2)', () => {
@@ -67,5 +68,31 @@ describe('PRODUCT_GROUPS', () => {
     // loses ~130 vehicles; bus alone is ~675 and everything else ~460
     expect(PRODUCT_GROUPS).toContain(8)
     expect(JNY_CAP).toBe(1000)
+  })
+})
+
+describe('groupsFor', () => {
+  const filters = (on: Partial<Filters>): Filters => ({
+    suburban: false, subway: false, tram: false, bus: false, ferry: false, express: false, regional: false,
+    ...on
+  })
+
+  it('returns only the rail group for the rail-only default', () => {
+    expect(groupsFor(filters({suburban: true, subway: true, tram: true}))).toEqual([7])
+  })
+
+  it('adds the bus group only when bus is on', () => {
+    expect(groupsFor(filters({bus: true}))).toEqual([8])
+    expect(groupsFor(filters({suburban: true, bus: true}))).toEqual([7, 8])
+  })
+
+  it('adds the remaining group when any other mode is on', () => {
+    expect(groupsFor(filters({ferry: true}))).toEqual([ALL_PRODUCTS - 7 - 8])
+  })
+
+  it('returns the full set when every mode is on, and nothing when all are off', () => {
+    expect(groupsFor(filters({suburban: true, subway: true, tram: true, bus: true, ferry: true, express: true, regional: true})))
+      .toEqual(PRODUCT_GROUPS)
+    expect(groupsFor(filters({}))).toEqual([])
   })
 })

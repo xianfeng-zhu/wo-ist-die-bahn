@@ -4,8 +4,8 @@
 // so the panel can be re-rendered from a fresh poll without the caller
 // untangling what changed.
 
-import {clockTime, delayLabel, etaLabel, minutesUntil} from './format.js'
-import type {Departure, JourneyDetail} from './journey.js'
+import {berlinSecondsOfDay, clockTime, delayLabel, etaLabel, minutesUntil} from './format.js'
+import type {Departure, JourneyDetail, StationNotice} from './journey.js'
 import type {Product, Vehicle} from './vehicle.js'
 
 const el = <K extends keyof HTMLElementTagNameMap>(
@@ -22,6 +22,22 @@ export function noticeBody(text: string, kind: 'loading' | 'empty' | 'error' = '
   const wrap = el('div', `notice notice-${kind}`)
   wrap.append(el('p', undefined, text))
   return wrap
+}
+
+/**
+ * The one line a rider wants first: where the vehicle is going and when.
+ *
+ * Built from data the radar already carries (`Vehicle.toStop` / `nextStop`), so
+ * this needs no extra request. Returns nulls for missing pieces rather than
+ * inventing a time; the caller decides what is still worth showing.
+ */
+export function arrivalSummary(v: Vehicle, nowSec: number): {next: string; time: string | null; eta: string | null} {
+  const next = v.toStop?.name ?? v.nextStop ?? ''
+  const t = v.toStop?.t
+  const time = t ? clockTime(t) : null
+  const minutes = t ? minutesUntil(t, nowSec) : null
+  const eta = minutes === null ? null : etaLabel(minutes)
+  return {next, time, eta}
 }
 
 export interface VehicleView {
@@ -54,6 +70,15 @@ export function vehicleView(
   opts: {onStop?: (stopId: string, name: string) => void} = {}
 ): VehicleView {
   const body = el('div', 'vdetail')
+
+  const arrival = arrivalSummary(v, berlinSecondsOfDay(new Date()))
+  if (arrival.next || arrival.time || arrival.eta) {
+    const summary = el('div', 'vsummary')
+    if (arrival.next) summary.append(el('p', 'vsummary-next', `Next: ${arrival.next}`))
+    const meta = [arrival.time, arrival.eta].filter((x): x is string => x != null)
+    if (meta.length > 0) summary.append(el('p', 'vsummary-meta', meta.join(' · ')))
+    body.append(summary)
+  }
 
   const delay = delayLabel(v.delayMs)
   if (delay) {
@@ -159,6 +184,7 @@ function estimateNote(): HTMLElement {
  */
 export function stationView(
   departures: Departure[],
+  notices: StationNotice[],
   nowSec: number,
   opts: {
     labels: Record<Product, string>
@@ -168,6 +194,11 @@ export function stationView(
   }
 ): HTMLElement {
   const body = el('div', 'sdetail')
+  if (notices.length > 0) {
+    const banner = el('div', 'snotices')
+    for (const n of notices) banner.append(el('p', `snotice snotice-${n.kind}`, n.text))
+    body.append(banner)
+  }
   const upcoming = departures.filter(d => (minutesUntil(d.time ?? undefined, nowSec) ?? -1) >= 0)
   if (upcoming.length === 0) {
     body.append(noticeBody('Nothing due here in the next hour.', 'empty'))
@@ -209,6 +240,11 @@ export function stationView(
         at.append(el('em', 'strip-delay', d.delaySec > 0 ? `+${Math.round(d.delaySec / 60)}` : `${Math.round(d.delaySec / 60)}`))
       }
       if (d.platform) where.append(el('span', 'dep-pltf', ` · ${d.platform}`))
+      if (d.notices?.length) {
+        const note = el('span', 'dep-notice', ' ⚠')
+        note.title = d.notices.map(n => n.text).join(' · ')
+        where.append(note)
+      }
 
       row.append(badge, where, at, when)
       if (opts.onPick && !d.cancelled) {

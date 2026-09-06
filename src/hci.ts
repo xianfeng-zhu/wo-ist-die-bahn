@@ -1,5 +1,5 @@
-import {Journey, transformJourney, Vehicle} from './vehicle.js'
-import {parseJourneyDetail, parseStationBoard, type Departure, type JourneyDetail} from './journey.js'
+import {Journey, transformJourney, Vehicle, type Filters} from './vehicle.js'
+import {parseJourneyDetail, parseStationBoardPage, type JourneyDetail, type StationBoardPage} from './journey.js'
 
 export const GATE_URL = 'https://fahrinfo.vbb.de/gate'
 
@@ -25,9 +25,32 @@ export const JNY_CAP = 1000
  * count goes up. The last group is every remaining bit, so a mode VBB adds later
  * still arrives.
  */
-export const PRODUCT_GROUPS = [7, 8, ALL_PRODUCTS - 7 - 8]
+/**
+ * The product groups requested separately, then merged. Bus alone is about 675
+ * vehicles and everything else about 460, so each group stays clear of `JNY_CAP`
+ * while one combined request would lose ~130. The last group is every remaining
+ * bit, so a mode VBB adds later still arrives.
+ *
+ * The three names exist so the caller can fetch only the groups whose modes are
+ * switched on: rail is `RAIL_GROUP`, bus is `BUS_GROUP`, ferry/regional/express
+ * (plus unassigned bits) is `OTHER_GROUP`.
+ */
+export const RAIL_GROUP = 7 // S=1, U=2, tram=4
+export const BUS_GROUP = 8
+export const OTHER_GROUP = ALL_PRODUCTS - RAIL_GROUP - BUS_GROUP
+export const PRODUCT_GROUPS = [RAIL_GROUP, BUS_GROUP, OTHER_GROUP]
 
-const RAIL_MASK = 7 // S=1, U=2, tram=4
+/**
+ * Which product groups a mode filter needs, in the same order `PRODUCT_GROUPS`
+ * uses. Empty means every mode is switched off and nothing needs fetching.
+ */
+export function groupsFor(filters: Filters): number[] {
+  const groups: number[] = []
+  if (filters.suburban || filters.subway || filters.tram) groups.push(RAIL_GROUP)
+  if (filters.bus) groups.push(BUS_GROUP)
+  if (filters.ferry || filters.express || filters.regional) groups.push(OTHER_GROUP)
+  return groups
+}
 
 export interface BBox {north: number; south: number; west: number; east: number}
 
@@ -52,7 +75,7 @@ export function berlinDateTime(now: Date): {date: string; time: string} {
   }
 }
 
-export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: number, products: number = RAIL_MASK) {
+export function buildRadarBody(bbox: BBox, date: string, time: string, maxJny: number, products: number = RAIL_GROUP) {
   return {
     lang: 'de',
     svcReqL: [{
@@ -138,7 +161,7 @@ export async function fetchVehiclePage(bbox: BBox, products: number, maxJny = 20
   return parseRadarPage(await res.json(), time)
 }
 
-export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal, products = RAIL_MASK): Promise<Vehicle[]> {
+export async function fetchVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal, products = RAIL_GROUP): Promise<Vehicle[]> {
   return (await fetchVehiclePage(bbox, products, maxJny, signal)).vehicles
 }
 
@@ -157,15 +180,20 @@ export interface RadarSweep {
  * the whole poll with it, exactly as the single request did before — a partial
  * map that silently drops every bus is worse than a poll marked stale.
  */
-export async function fetchAllVehicles(bbox: BBox, maxJny = 2000, signal?: AbortSignal): Promise<RadarSweep> {
-  const pages = await Promise.all(PRODUCT_GROUPS.map(m => fetchVehiclePage(bbox, m, maxJny, signal)))
+export async function fetchAllVehicles(
+  bbox: BBox,
+  maxJny = 2000,
+  signal?: AbortSignal,
+  groups: number[] = PRODUCT_GROUPS
+): Promise<RadarSweep> {
+  const pages = await Promise.all(groups.map(m => fetchVehiclePage(bbox, m, maxJny, signal)))
   // Dedupe by journey id: the groups do not overlap today, but a mask VBB
   // reassigns must not put the same vehicle on the map twice.
   const byId = new Map<string, Vehicle>()
   for (const p of pages) for (const v of p.vehicles) byId.set(v.id, v)
   return {
     vehicles: [...byId.values()],
-    capped: PRODUCT_GROUPS.filter((_, i) => pages[i].journeys >= JNY_CAP)
+    capped: groups.filter((_, i) => pages[i].journeys >= JNY_CAP)
   }
 }
 
@@ -192,13 +220,13 @@ export async function fetchJourneyDetail(jid: string, signal?: AbortSignal): Pro
  */
 export async function fetchStationBoard(
   extId: string, minutes = 60, maxJny = 30, signal?: AbortSignal
-): Promise<Departure[]> {
+): Promise<StationBoardPage> {
   const {date, time} = berlinDateTime(new Date())
   const json = await gate([{meth: 'StationBoard', req: {
     type: 'DEP', date, time, stbLoc: {extId}, dur: minutes, maxJny,
     jnyFltrL: [{type: 'PROD', mode: 'INC', value: ALL_PRODUCTS}]
   }}], signal)
-  return parseStationBoard(json)
+  return parseStationBoardPage(json)
 }
 
 /** POST one or more HCI service requests to the gate. */

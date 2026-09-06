@@ -139,29 +139,109 @@ export interface Departure {
   delaySec: number | null
   cancelled: boolean
   platform: string | null
+  /** Journey-level notices for this departure (e.g. additional service). */
+  notices?: StationNotice[]
+}
+
+/** Rough category for a HAFAS `remL` notice, decided from its code. */
+export type NoticeKind =
+  | 'information'
+  | 'construction'
+  | 'disruption'
+  | 'elevator'
+  | 'occupancy'
+  | 'other'
+
+export interface StationNotice {
+  text: string
+  kind: NoticeKind
+}
+
+/** A parsed departure board: the departures plus station-level notices. */
+export interface StationBoardPage {
+  departures: Departure[]
+  /** Notices attached to the station rather than one particular journey. */
+  notices: StationNotice[]
+}
+
+interface RawRem {
+  code?: string
+  txtN?: string
+  txtL?: string
+  txtS?: string
+  type?: string
+}
+
+interface RawMsg {
+  remX?: number
+}
+
+function classifyRem(rem: RawRem): NoticeKind {
+  const code = (rem.code ?? '').toLowerCase()
+  if (code.startsWith('text.occup')) return 'occupancy'
+  if (code.includes('elevator') || code.includes('aufzug')) return 'elevator'
+  if (code.includes('construction') || code.includes('baustelle') || code.includes('bauarbeiten')) return 'construction'
+  if (code.includes('disruption') || code.includes('stoerung') || code.includes('störung')) return 'disruption'
+  return 'information'
 }
 
 /**
- * Parse a `StationBoard` response into departures, earliest first.
+ * A `remX` index into `common.remL`, as human text. Operator rows are dropped:
+ * "S-Bahn Berlin GmbH" is metadata, not something a rider needs on a board.
+ */
+function noticeFromRem(remX: number | undefined, remL: RawRem[]): StationNotice | null {
+  if (remX == null) return null
+  const rem = remL[remX]
+  if (!rem || rem.code === 'OPERATOR') return null
+  const text = rem.txtN ?? rem.txtL ?? rem.txtS
+  if (!text) return null
+  return {text, kind: classifyRem(rem)}
+}
+
+function dedupeNotices(list: StationNotice[]): StationNotice[] {
+  const seen = new Set<string>()
+  const out: StationNotice[] = []
+  for (const n of list) {
+    const key = `${n.kind}:${n.text}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(n)
+  }
+  return out
+}
+
+/**
+ * Parse a `StationBoard` response into departures and notices, earliest first.
  *
  * Cancelled departures are KEPT: "this one is not running" is the single most
  * useful thing a board can tell someone waiting for it.
+ *
+ * Notices come from `common.remL` via `remX` refs on `jnyL[].msgL` (journey
+ * level) and `stbStop.msgL` (stop level). Occupancy is deliberately left out of
+ * this round; it is a separate, richer feature.
  */
-export function parseStationBoard(json: unknown): Departure[] {
+export function parseStationBoardPage(json: unknown): StationBoardPage {
   const svc = (json as {svcResL?: Array<{err?: string; res?: unknown}>}).svcResL?.[0]
-  if (!svc || svc.err !== 'OK') return []
+  if (!svc || svc.err !== 'OK') return {departures: [], notices: []}
   const res = svc.res as {
     jnyL?: Array<{
       jid?: string
       prodX?: number
       dirTxt?: string
       isCncl?: boolean
-      stbStop?: {dTimeS?: string; dTimeR?: string; aTimeS?: string; aTimeR?: string; dPltfR?: {txt?: string}; dPltfS?: {txt?: string}; dCncl?: boolean}
+      msgL?: RawMsg[]
+      stbStop?: {
+        dTimeS?: string; dTimeR?: string; aTimeS?: string; aTimeR?: string
+        dPltfR?: {txt?: string}; dPltfS?: {txt?: string}; dCncl?: boolean
+        msgL?: RawMsg[]
+      }
     }>
-    common?: {prodL?: Array<{name?: string; cls?: number}>}
+    common?: {prodL?: Array<{name?: string; cls?: number}>; remL?: RawRem[]}
   } | undefined
   const prods = res?.common?.prodL ?? []
+  const remL = res?.common?.remL ?? []
   const out: Departure[] = []
+  const stationNotices: StationNotice[] = []
   for (const j of res?.jnyL ?? []) {
     if (!j.jid) continue
     const prod = prods[j.prodX ?? -1]
@@ -171,6 +251,17 @@ export function parseStationBoard(json: unknown): Departure[] {
     if (!rt && !sched) continue
     const rtSec = timeToSeconds(rt ?? undefined)
     const schedSec = timeToSeconds(sched ?? undefined)
+    const journeyNotices = dedupeNotices(
+      (j.msgL ?? [])
+        .map(m => noticeFromRem(m.remX, remL))
+        .filter((n): n is StationNotice => n != null && n.kind !== 'occupancy')
+    )
+    const stopNotices = dedupeNotices(
+      (st.msgL ?? [])
+        .map(m => noticeFromRem(m.remX, remL))
+        .filter((n): n is StationNotice => n != null && n.kind !== 'occupancy')
+    )
+    stationNotices.push(...stopNotices)
     out.push({
       jid: j.jid,
       line: (prod?.name ?? '').trim(),
@@ -180,8 +271,15 @@ export function parseStationBoard(json: unknown): Departure[] {
       scheduled: sched,
       delaySec: rtSec != null && schedSec != null ? wrapDiff(rtSec - schedSec) : null,
       cancelled: j.isCncl === true || st.dCncl === true,
-      platform: st.dPltfR?.txt ?? st.dPltfS?.txt ?? null
+      platform: st.dPltfR?.txt ?? st.dPltfS?.txt ?? null,
+      notices: journeyNotices.length > 0 ? journeyNotices : undefined
     })
   }
-  return out.sort((a, b) => (timeToSeconds(a.time ?? undefined) ?? 0) - (timeToSeconds(b.time ?? undefined) ?? 0))
+  out.sort((a, b) => (timeToSeconds(a.time ?? undefined) ?? 0) - (timeToSeconds(b.time ?? undefined) ?? 0))
+  return {departures: out, notices: dedupeNotices(stationNotices)}
+}
+
+/** Departure-only view of a board, for callers that do not need notices. */
+export function parseStationBoard(json: unknown): Departure[] {
+  return parseStationBoardPage(json).departures
 }

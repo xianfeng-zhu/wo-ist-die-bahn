@@ -1,12 +1,12 @@
-import {Map as GLMap, Marker, Popup, setWorkerUrl, type FilterSpecification, type MapLayerMouseEvent} from 'maplibre-gl'
+import {GeolocateControl, Map as GLMap, Marker, Popup, setWorkerUrl, type FilterSpecification, type MapLayerMouseEvent} from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import './style.css'
-import {fetchAllVehicles, BBox, JNY_CAP} from './hci.js'
+import {fetchAllVehicles, BBox, JNY_CAP, groupsFor} from './hci.js'
 import {compareLineNames, filterVehicles, Forecast, lineKey, LineSighting, Product, recordLineSightings, shortId, StopRef, Vehicle} from './vehicle.js'
 import {lineColors} from './line-colors.js'
 import {textOn} from './contrast.js'
 import {fetchJourneyDetail, fetchStationBoard} from './hci.js'
-import {markProgress, type Departure, type JourneyDetail} from './journey.js'
+import {markProgress, type JourneyDetail, type StationBoardPage} from './journey.js'
 import {berlinSecondsOfDay} from './format.js'
 import {Panel} from './panel.js'
 import {noticeBody, stationView, vehicleView, type VehicleView} from './views.js'
@@ -15,6 +15,7 @@ import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metres
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
 import type {FrameEntry} from './recorder.js'
+import {decodeViewState, encodeViewState} from './url.js'
 
 // Everything under public/ is served from the deployment's base path, which is
 // NOT the domain root on GitHub Pages (a project site lives at /<repo>/). Vite
@@ -166,6 +167,18 @@ const map = new GLMap({
 // own (devtools docking, split view, DPR change on monitor switch).
 new ResizeObserver(() => map.resize()).observe(map.getContainer())
 
+// "Where am I": the first control a transit map should offer on a phone. On a
+// successful locate the map centres once; it does not keep following the user.
+// A denied or unavailable location is quiet — the map simply stays usable.
+const geolocate = new GeolocateControl({
+  positionOptions: {enableHighAccuracy: false},
+  trackUserLocation: false,
+  showUserLocation: true,
+  fitBoundsOptions: {maxZoom: 15}
+})
+geolocate.on('error', () => {})
+map.addControl(geolocate, 'bottom-right')
+
 // Below this zoom, badges outnumber the space for them: 38% overlapped at z12
 // with labels on. The official VBB livemap hides labels under z13 too.
 const LABEL_MIN_ZOOM = 13
@@ -189,9 +202,16 @@ map.on('moveend', () => {
 
 // --- vehicle markers (line-labeled badges) ---
 const markers = new Map<string, Marker>()
-/** Active product filter (one flag per mode; all on by default). */
+/**
+ * Active product filter (one flag per mode).
+ *
+ * Rail modes are on by default so the map opens on the vehicles most people
+ * watch, and the poll fetches only those groups — the bus group alone is about
+ * 1.3 MB of a full 2.2 MB poll, so this is also the bandwidth default. Turning
+ * a mode on fetches its group on the next poll.
+ */
 const filters: Record<Product, boolean> = {
-  suburban: true, subway: true, tram: true, bus: true, ferry: true, express: true, regional: true
+  suburban: true, subway: true, tram: true, bus: false, ferry: false, express: false, regional: false
 }
 /**
  * Active line-name selection. An EMPTY set means nothing is picked and so shows
@@ -211,6 +231,9 @@ let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
 /** Product masks whose last response hit the gate's journey cap (see `JNY_CAP`). */
 let capped: number[] = []
+// A shared link carries the mode/line filters and camera. Apply them before the
+// first poll so the right product groups are fetched from the start.
+applyInitialViewState()
 
 // --- forecast-driven, track-following animation ---
 // Position comes from the operator's own ~30 s forecast (Vehicle.forecast),
@@ -762,7 +785,7 @@ let detailTarget: DetailTarget | null = null
 /** Cached journey for the open vehicle, so a poll can re-render without refetching. */
 let detailJourney: JourneyDetail | null = null
 let detailStrip: VehicleView | null = null
-let detailBoard: Departure[] = []
+let detailBoard: StationBoardPage = {departures: [], notices: []}
 let detailAbort: AbortController | null = null
 
 const urlFor = (t: DetailTarget | null): string => {
@@ -816,7 +839,7 @@ function clearDetail(): void {
   detailTarget = null
   detailJourney = null
   detailStrip = null
-  detailBoard = []
+  detailBoard = {departures: [], notices: []}
   navDepth = 0
   followSelected = false
   recentring = false
@@ -840,7 +863,7 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
   detailTarget = t
   detailJourney = null
   detailStrip = null
-  detailBoard = []
+  detailBoard = {departures: [], notices: []}
   if (!t) { clearDetail(); return }
 
   if (t.kind === 'vehicle') {
@@ -951,7 +974,7 @@ function renderVehicleDetail(): VehicleView | null {
 
 function renderStopDetail(): void {
   if (detailTarget?.kind !== 'stop') return
-  panel.updateBody(stationView(detailBoard, berlinSecondsOfDay(new Date()), {
+  panel.updateBody(stationView(detailBoard.departures, detailBoard.notices, berlinSecondsOfDay(new Date()), {
     labels: PRODUCT_LABELS,
     colourFor: d => lineColors[d.line] ?? (d.product ? PRODUCT_COLORS[d.product] : '#666666'),
     textFor: textOn,
@@ -1215,6 +1238,61 @@ function addFocusRouteLayers(): void {
 }
 map.on('load', addFocusRouteLayers)
 
+/** Apply `?types=`, `?lines=`, `?center=` and `?zoom=` from a shared link. */
+function applyInitialViewState(): void {
+  const state = decodeViewState(location.search)
+  if (state.types) {
+    for (const p of Object.keys(filters) as Product[]) filters[p] = false
+    for (const p of state.types) filters[p] = true
+  }
+  if (state.lineMode === 'custom') {
+    lineMode = 'custom'
+    lineFilter = new Set(state.lines ?? [])
+  }
+  if (state.center || state.zoom != null) {
+    map.jumpTo({center: state.center ?? map.getCenter(), zoom: state.zoom ?? map.getZoom()})
+  }
+}
+
+/**
+ * A complete, shareable link for the view on screen now: filters, camera, and
+ * the open detail panel if there is one.
+ */
+function shareUrl(): string {
+  const detail = urlFor(detailTarget)
+  const view = encodeViewState({
+    types: (Object.keys(PRODUCT_LABELS) as Product[]).filter(p => filters[p]),
+    lineMode,
+    lines: lineMode === 'custom' ? [...lineFilter] : [],
+    center: [map.getCenter().lng, map.getCenter().lat],
+    zoom: map.getZoom()
+  })
+  const sep = detail.includes('?') ? '&' : '?'
+  return `${location.origin}${detail}${sep}${view}`
+}
+
+/** Share the current view, or fall back to the clipboard. */
+async function copyShareLink(btn: HTMLButtonElement): Promise<void> {
+  const url = shareUrl()
+  try {
+    if (navigator.share) {
+      await navigator.share({title: document.title, url})
+      return
+    }
+  } catch (err) {
+    // AbortError means the user dismissed the share sheet; that is not a failure.
+    if ((err as {name?: string}).name === 'AbortError') return
+  }
+  try {
+    await navigator.clipboard.writeText(url)
+  } catch {
+    return // no share, no clipboard: nothing we can do quietly
+  }
+  const original = btn.textContent
+  btn.textContent = 'Copied'
+  setTimeout(() => { btn.textContent = original }, 1500)
+}
+
 /** Read the URL and show what it names. Runs on first load and on Back/Forward. */
 function applyUrl(): void {
   const q = new URLSearchParams(location.search)
@@ -1357,6 +1435,8 @@ function focusLine(hit: {line: string; product: Product; key: string}): void {
   rebuildTypes()
   rebuildLines()
   render()
+  // a search result can be the first time a hidden mode is switched on
+  requestRefresh()
 
   const on = vehicles.filter(v => lineKey(v) === hit.key)
   if (on.length === 0) return
@@ -1486,6 +1566,17 @@ const schedule = (delay: number) => {
   clearTimeout(pollTimer)
   pollTimer = setTimeout(() => void poll(), delay)
 }
+/**
+ * Bring the next poll forward because a filter changed.
+ *
+ * If a poll is already running we cannot start another one, so leave a flag that
+ * the running poll's `finally` reads and turns into an immediate follow-up.
+ */
+let refreshQueued = false
+const requestRefresh = () => {
+  if (inFlight) { refreshQueued = true; return }
+  void poll()
+}
 async function poll() {
   /*
    * Nothing is drawn in a hidden tab, so nothing needs fetching.
@@ -1505,8 +1596,23 @@ async function poll() {
   controller = new AbortController()
   const t = setTimeout(() => controller!.abort(), 15000)
   try {
-    // every mode, fetched as several product groups because one request is capped
-    const sweep = await fetchAllVehicles(BERLIN_BBOX, 2000, controller.signal)
+    // Fetch only the groups whose modes are switched on, so a rail-only default
+    // does not also pay for the bus group on every poll. The groups are the same
+    // split as before — several requests because one request is capped at 1,000.
+    const groups = groupsFor(filters)
+    if (groups.length === 0) {
+      vehicles = []
+      capped = []
+      lastUpdate = Date.now()
+      failures = 0
+      nextDelay = POLL_INTERVAL_MS
+      conn = 'live'
+      updateLiveLines([])
+      render()
+      onFreshData()
+      return
+    }
+    const sweep = await fetchAllVehicles(BERLIN_BBOX, 2000, controller.signal, groups)
     vehicles = sweep.vehicles
     capped = sweep.capped
     if (capped.length > 0) {
@@ -1538,7 +1644,8 @@ async function poll() {
   } finally {
     clearTimeout(t)
     inFlight = false
-    schedule(nextDelay)
+    schedule(refreshQueued ? 0 : nextDelay)
+    refreshQueued = false
   }
 }
 
@@ -1675,11 +1782,16 @@ lineSearch.oninput = () => rebuildLines()
 const matchesSearch = (name: string): boolean =>
   name.toLowerCase().includes(lineSearch.value.trim().toLowerCase())
 
-/** Types with a line running now, in the order PRODUCT_LABELS declares them. */
-const presentTypes = (): Product[] => {
-  const have = new Set([...liveLines.values()].map(e => e.product))
-  return (Object.keys(PRODUCT_LABELS) as Product[]).filter(p => have.has(p))
-}
+/**
+ * The modes offered by the Type menu, in the order `PRODUCT_LABELS` declares
+ * them.
+ *
+ * This is every mode, not only the ones running. With poll gating, a mode the
+ * user has switched off is not fetched, so it would otherwise disappear from
+ * the menu and there would be nothing left to switch it back on. The Line menu
+ * stays running-only — a line still has to be seen before it can be picked.
+ */
+const presentTypes = (): Product[] => Object.keys(PRODUCT_LABELS) as Product[]
 
 /** One checkbox row. `onSet` receives the new checked state. */
 function checkRow(text: string, checked: boolean, onSet: (on: boolean) => void, colour?: string) {
@@ -1736,11 +1848,6 @@ const WAITING = 'waiting for live data…'
 
 function rebuildTypes() {
   const types = presentTypes()
-  if (types.length === 0) {
-    typeUi.body.replaceChildren(hint(WAITING))
-    typeUi.caption.textContent = '…'
-    return
-  }
   const allOn = types.every(p => filters[p])
   typeUi.body.replaceChildren(
     checkRow('All types', allOn, on => {
@@ -1748,18 +1855,22 @@ function rebuildTypes() {
       // a line whose type just went away must stop filtering, or the map empties
       // with no visible reason why
       dropHiddenLines()
+      pruneLiveLines()
       rebuildTypes()
       rebuildLines()
       render()
+      requestRefresh()
     })
   )
   for (const p of types) {
     typeUi.body.append(checkRow(PRODUCT_LABELS[p], filters[p], on => {
       filters[p] = on
       dropHiddenLines()
+      pruneLiveLines()
       rebuildTypes()
       rebuildLines()
       render()
+      requestRefresh()
     }, PRODUCT_COLORS[p]))
   }
   typeUi.caption.textContent = describeTypes()
@@ -1771,6 +1882,18 @@ function dropHiddenLines() {
     const p = liveLines.get(key)?.product
     if (p && !filters[p]) lineFilter.delete(key)
   }
+}
+
+/**
+ * Forget live-line sightings for modes that are switched off.
+ *
+ * `recordLineSightings` only forgets a line after `LINE_LINGER_MS`, which was
+ * right when every mode was always fetched. Now that un-fetching a mode leaves
+ * stale sightings in the table, clear them at the moment the mode goes off so a
+ * later re-enable starts from an empty list rather than six polls of ghost rows.
+ */
+function pruneLiveLines() {
+  for (const [key, e] of liveLines) if (!filters[e.product]) liveLines.delete(key)
 }
 
 /** A line is ticked when the mode is `all`, or when it is in the selection. */
@@ -1845,7 +1968,6 @@ function rebuildLines() {
 /** Record the lines seen in a poll, and rebuild the menus if the list changed. */
 function updateLiveLines(seen: Iterable<Vehicle>) {
   if (!recordLineSightings(liveLines, seen, Date.now(), LINE_LINGER_MS)) return
-  rebuildTypes()
   rebuildLines()
 }
 rebuildTypes()
@@ -1875,6 +1997,18 @@ const toggleLayer = (layerId: string, name: string, on: boolean, parent: HTMLEle
 }
 toggleLayer('routes-layer', 'Routes', true, filterEl)
 toggleLayer('stations-layer', 'Stations', true, filterEl, ['stations-hit'])
+
+// A link to the exact view on screen — filters, camera and open panel — so a
+// moment on the map can be sent to someone else rather than described.
+const shareRow = document.createElement('div')
+shareRow.className = 'mode'
+const shareBtn = document.createElement('button')
+shareBtn.type = 'button'
+shareBtn.textContent = 'Copy link'
+shareBtn.title = 'Copy a link to this view'
+shareBtn.onclick = () => { void copyShareLink(shareBtn) }
+shareRow.append(shareBtn)
+filterEl.append(shareRow)
 
 // --- one Debug switch for the whole test overlay ---
 // Four separate switches were confusing, and the network layers had none at all

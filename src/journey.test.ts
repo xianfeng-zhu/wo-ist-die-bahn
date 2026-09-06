@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {markProgress, parseJourneyDetail, parseStationBoard, type JourneyStop} from './journey.js'
+import {markProgress, parseJourneyDetail, parseStationBoard, parseStationBoardPage, type JourneyStop} from './journey.js'
 
 // Shapes taken from real gate responses (2026-08-27). JourneyDetails returned 31
 // stops for a tram whose radar entry had 4; StationBoard resolved a board from an
@@ -182,5 +182,40 @@ describe('parseStationBoard', () => {
   it('returns an empty board on an error response', () => {
     expect(parseStationBoard({svcResL: [{err: 'NOOK'}]})).toEqual([])
     expect(parseStationBoard({})).toEqual([])
+  })
+})
+
+describe('parseStationBoardPage notices', () => {
+  it('keeps journey notices and drops operator metadata', () => {
+    const page = parseStationBoardPage({
+      svcResL: [{err: 'OK', res: {
+        common: {
+          prodL: [{name: 'S5', cls: 1}],
+          remL: [
+            {code: 'OPERATOR', txtL: 'S-Bahn Berlin GmbH', txtN: 'DBS'},
+            {code: 'FK', txtN: 'Fahrradmitnahme möglich'}
+          ]
+        },
+        jnyL: [{jid: 'a', prodX: 0, dirTxt: 'S Strausberg', msgL: [{remX: 0}, {remX: 1}], stbStop: {dTimeS: '234800'}}]
+      }}]
+    })
+    expect(page.departures[0].notices).toEqual([{text: 'Fahrradmitnahme möglich', kind: 'information'}])
+  })
+
+  it('turns non-occupancy stop notices into station notices', () => {
+    const page = parseStationBoardPage({
+      svcResL: [{err: 'OK', res: {
+        common: {
+          prodL: [{name: 'S5', cls: 1}],
+          remL: [
+            {code: 'text.occup.loc.max.13', txtN: 'Hohe Auslastung erwartet'},
+            {code: 'ELEVATOR', txtN: 'Aufzug defekt'}
+          ]
+        },
+        jnyL: [{jid: 'a', prodX: 0, dirTxt: 'S Strausberg', stbStop: {dTimeS: '234800', msgL: [{remX: 0}, {remX: 1}]}}]
+      }}]
+    })
+    expect(page.notices).toEqual([{text: 'Aufzug defekt', kind: 'elevator'}])
+    expect(page.departures[0].notices).toBeUndefined()
   })
 })
