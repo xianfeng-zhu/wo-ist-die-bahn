@@ -58,3 +58,46 @@ export function decodeViewState(search: string): Partial<ViewState> {
   }
   return out
 }
+
+/**
+ * The shareable form of a not-yet-departed service: the journey id, the display
+ * metadata the header needs before the fetch answers, and the stop whose board
+ * the rider came from (`at`), so the schedule can be re-opened after a reload
+ * with the same "this is my stop" marking.
+ */
+export interface JourneyLinkState {
+  id: string
+  line: string
+  product: ProductKey | null
+  direction: string
+  stopId: string | null
+  stopName: string | null
+}
+
+export function encodeJourneyState(s: JourneyLinkState): string {
+  const p = new URLSearchParams()
+  p.set('journey', s.id)
+  if (s.product) p.set('p', s.product)
+  if (s.line) p.set('line', s.line)
+  if (s.direction) p.set('dir', s.direction)
+  if (s.stopId) p.set('at', s.stopId)
+  if (s.stopName) p.set('atName', s.stopName)
+  return p.toString()
+}
+
+/** Read the journey parameters out of a query string; null when absent. */
+export function decodeJourneyState(search: string): Partial<JourneyLinkState> | null {
+  const q = new URLSearchParams(search)
+  const id = q.get('journey')
+  if (!id) return null
+  const out: Partial<JourneyLinkState> = {id}
+  const product = q.get('p')
+  if (product && (PRODUCT_KEYS as string[]).includes(product)) {
+    out.product = product as ProductKey
+  }
+  if (q.get('line')) out.line = q.get('line')!
+  if (q.get('dir')) out.direction = q.get('dir')!
+  if (q.get('at')) out.stopId = q.get('at')!
+  if (q.get('atName')) out.stopName = q.get('atName')!
+  return out
+}

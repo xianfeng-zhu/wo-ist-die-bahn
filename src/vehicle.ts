@@ -1,4 +1,5 @@
 import {decodePolyline} from './polyline.js'
+import {noticesFromMsgL, type RawMsg, type RawRem, type StationNotice} from './notice.js'
 
 /**
  * Every mode the VBB radar returns. Measured against the live feed on
@@ -63,6 +64,12 @@ export interface Vehicle {
   toStop?: StopRef
   /** Operator forecast for the next ~30 s (`ani.mSec` + `ani.polyG`). */
   forecast?: Forecast
+  /**
+   * Journey-level notices the operator attached to this vehicle (construction,
+   * disruption, elevator faults, extra services). Occupancy is classified but
+   * deliberately not carried — it is a separate feature.
+   */
+  notices?: StationNotice[]
 }
 
 export const PRODUCT_BY_CLS: Record<number, Product> = {
@@ -221,6 +228,8 @@ interface Common {
   prods: Array<{name?: string; cls?: number}>
   /** `common.polyL`; indexed by `ani.polyG.polyXL`. */
   polys?: Array<{crdEncYX?: string}>
+  /** `common.remL`; indexed by `jnyL[].msgL[].remX`. */
+  remL?: RawRem[]
 }
 
 export interface Journey {
@@ -242,6 +251,8 @@ export interface Journey {
     mSec?: number[]
     polyG?: {polyXL?: number[]}
   }
+  /** Indexes into `common.remL` for this journey's own notices. */
+  msgL?: RawMsg[]
 }
 
 export function transformJourney(j: Journey, common: Common, nowTime: string): Vehicle | null {
@@ -288,6 +299,7 @@ export function transformJourney(j: Journey, common: Common, nowTime: string): V
     const n = Math.min(pts.length, ms.length)
     if (n > 0) forecast = {ms: ms.slice(0, n), pts: pts.slice(0, n)}
   }
+  const notices = noticesFromMsgL(j.msgL, common.remL ?? [], new Set(['occupancy']))
   return {
     fromStop: stopAt(j.ani?.fLocX?.[0]),
     toStop: stopAt(j.ani?.tLocX?.[0]),
@@ -300,6 +312,7 @@ export function transformJourney(j: Journey, common: Common, nowTime: string): V
     lon: j.pos.x / 1e6,
     nextStop: next ? nextLoc?.name ?? null : null,
     delayMs: next ? delayFrom(next) : null,
+    notices: notices.length > 0 ? notices : undefined,
     stops: stops.length >= 2 ? stops : undefined
   }
 }

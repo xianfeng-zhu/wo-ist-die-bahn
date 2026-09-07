@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {decodeViewState, encodeViewState} from './url.js'
+import {decodeJourneyState, decodeViewState, encodeJourneyState, encodeViewState} from './url.js'
 
 describe('encodeViewState', () => {
   it('writes types, custom lines and camera', () => {
@@ -38,5 +38,32 @@ describe('decodeViewState', () => {
 
   it('ignores an out-of-range camera and zoom', () => {
     expect(decodeViewState('center=200%2C91&zoom=30')).toEqual({})
+  })
+})
+
+describe('journey link state', () => {
+  it('round-trips a future service and its "you came from this stop" marker', () => {
+    const q = encodeJourneyState({
+      id: '1|67335|0|86|7092026',
+      line: 'U2',
+      product: 'subway',
+      direction: 'Theodor-Heuss-Platz',
+      stopId: '900100003',
+      stopName: 'S+U Alexanderplatz Bhf'
+    })
+    expect(decodeJourneyState(q)).toEqual({
+      id: '1|67335|0|86|7092026',
+      line: 'U2',
+      product: 'subway',
+      direction: 'Theodor-Heuss-Platz',
+      stopId: '900100003',
+      stopName: 'S+U Alexanderplatz Bhf'
+    })
+  })
+
+  it('stays null without a journey id and ignores an unknown product', () => {
+    expect(decodeJourneyState('line=U2')).toBeNull()
+    const partial = decodeJourneyState('journey=x&p=nonsense&at=9')
+    expect(partial).toEqual({id: 'x', stopId: '9'})
   })
 })

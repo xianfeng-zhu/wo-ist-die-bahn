@@ -113,6 +113,7 @@ interface RadarResponse {
         locL?: Array<{name?: string; crd?: {x?: number; y?: number}}>
         prodL?: Array<{name?: string; cls?: number}>
         polyL?: Array<{crdEncYX?: string}>
+        remL?: Array<{code?: string; txtN?: string; txtL?: string; txtS?: string; type?: string}>
       }
       jnyL?: Journey[]
     }
@@ -133,7 +134,8 @@ export function parseRadarPage(json: unknown, nowTime: string): RadarPage {
   const common = {
     locs: res.common?.locL ?? [],
     prods: res.common?.prodL ?? [],
-    polys: res.common?.polyL ?? []
+    polys: res.common?.polyL ?? [],
+    remL: res.common?.remL ?? []
   }
   const journeys = res.jnyL ?? []
   return {

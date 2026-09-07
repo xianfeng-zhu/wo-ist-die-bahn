@@ -56,6 +56,27 @@ describe('parseRadar', () => {
   it('throws on server error', () => {
     expect(() => parseRadar({svcResL: [{err: 'NOOK', res: {}}]}, '23:00:00')).toThrow()
   })
+
+  it('carries journey notices, dropping operator rows and occupancy', () => {
+    const vehicles = parseRadar({
+      svcResL: [{err: 'OK', res: {
+        common: {
+          locL: [{name: 'S Schöneweide'}],
+          prodL: [{name: 'S9', cls: 1}],
+          remL: [
+            {code: 'BAUSTELLE', txtN: 'Bauarbeiten zwischen A und B'},
+            {code: 'OPERATOR', txtN: 'S-Bahn Berlin GmbH'},
+            {code: 'text.occup.jny.max.12', txtN: 'Mittlere Auslastung'}
+          ]
+        },
+        jnyL: [
+          {jid: 's1', prodX: 0, dirTxt: 'd1', pos: {x: 13490000, y: 52460000},
+            msgL: [{remX: 0}, {remX: 1}, {remX: 2}], stopL: []}
+        ]
+      }}]
+    }, '23:00:00')
+    expect(vehicles[0].notices).toEqual([{text: 'Bauarbeiten zwischen A und B', kind: 'construction'}])
+  })
 })
 
 describe('PRODUCT_GROUPS', () => {

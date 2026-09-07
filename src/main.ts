@@ -9,13 +9,18 @@ import {fetchJourneyDetail, fetchStationBoard} from './hci.js'
 import {markProgress, type JourneyDetail, type StationBoardPage} from './journey.js'
 import {berlinSecondsOfDay} from './format.js'
 import {Panel} from './panel.js'
-import {arrivalSummary, noticeBody, stationView, vehicleView, type VehicleView} from './views.js'
+import {
+  arrivalSummary, journeyFocusIndex, journeyView, lineChipsFor, noticeBody, stationView, vehicleView,
+  type JourneyView, type VehicleView
+} from './views.js'
 import {search} from './search.js'
 import {advanceAlong, AnimState, forwardStep, impliedSpeed, maxResidualM, metresBetween, pointAlongPath, projectOntoPath, slicePath, SPEED_SANITY_MPS} from './motion.js'
 import {buildSegmentPath, LineShapes} from './track.js'
 import {MotionRecorder} from './recorder.js'
 import type {FrameEntry} from './recorder.js'
-import {decodeViewState, encodeViewState} from './url.js'
+import {decodeJourneyState, decodeViewState, encodeJourneyState, encodeViewState} from './url.js'
+import {decodeFilterPrefs, encodeFilterPrefs} from './prefs.js'
+import {aggregateLineNotices, IMPORTANT_NOTICE_KINDS, type LineNoticeAgg} from './notice.js'
 
 // Everything under public/ is served from the deployment's base path, which is
 // NOT the domain root on GitHub Pages (a project site lives at /<repo>/). Vite
@@ -98,6 +103,8 @@ const PRODUCT_LABELS: Record<Product, string> = {
 // flashing, no tile-management gaps), tile overscaling capped by the engine.
 // Persist the user's map view (center + zoom) across page refreshes.
 const VIEW_KEY = 'liveberlin.mapview'
+/** The type/line selection the user chose, so a reload starts where they were. */
+const FILTERS_KEY = 'liveberlin.filters'
 function loadView(): {center: [number, number]; zoom: number} | null {
   try {
     const raw = localStorage.getItem(VIEW_KEY)
@@ -231,8 +238,24 @@ let lastUpdate = 0
 let conn: 'live' | 'stale' | 'offline' = 'offline'
 /** Product masks whose last response hit the gate's journey cap (see `JNY_CAP`). */
 let capped: number[] = []
-// A shared link carries the mode/line filters and camera. Apply them before the
-// first poll so the right product groups are fetched from the start.
+/*
+ * Boot order matters: saved prefs set the filters first, then the URL view
+ * state overrides whatever fields a shared link names. A link must reproduce
+ * itself; a saved preference must never beat it.
+ */
+let savedPrefs = null as ReturnType<typeof decodeFilterPrefs>
+try {
+  savedPrefs = decodeFilterPrefs(localStorage.getItem(FILTERS_KEY))
+} catch {
+  // storage unavailable (private mode etc.) — prefs just won't be remembered
+}
+if (savedPrefs) {
+  for (const p of Object.keys(filters) as Product[]) filters[p] = savedPrefs.types.includes(p)
+  lineMode = savedPrefs.lineMode
+  lineFilter = new Set(savedPrefs.lines)
+}
+// A shared link carries the mode/line filters and camera. Apply it after the
+// saved prefs so the right product groups are fetched from the start.
 applyInitialViewState()
 
 // --- forecast-driven, track-following animation ---
@@ -780,19 +803,30 @@ const stationIndex = new Map<string, {name: string; lat: number; lon: number}>()
 type DetailTarget =
   | {kind: 'vehicle'; id: string}
   | {kind: 'stop'; id: string; name: string}
+  | {kind: 'journey'; id: string; line: string; product: Product | null; direction: string; stopId: string | null; stopName: string | null}
 
 let detailTarget: DetailTarget | null = null
 /** Cached journey for the open vehicle, so a poll can re-render without refetching. */
 let detailJourney: JourneyDetail | null = null
 let detailStrip: VehicleView | null = null
 let detailBoard: StationBoardPage = {departures: [], notices: []}
+/** The chip the rider picked on the open board; null is "All". */
+let boardLineKey: string | null = null
 let detailAbort: AbortController | null = null
 
 const urlFor = (t: DetailTarget | null): string => {
   const base = location.pathname
   if (!t) return base
-  return t.kind === 'vehicle' ? `${base}?vehicle=${encodeURIComponent(shortId(t.id))}`
-    : `${base}?stop=${encodeURIComponent(t.id)}`
+  if (t.kind === 'vehicle') return `${base}?vehicle=${encodeURIComponent(shortId(t.id))}`
+  if (t.kind === 'stop') return `${base}?stop=${encodeURIComponent(t.id)}`
+  return `${base}?${encodeJourneyState({
+    id: t.id,
+    line: t.line,
+    product: t.product,
+    direction: t.direction,
+    stopId: t.stopId,
+    stopName: t.stopName
+  })}`
 }
 
 /** Open a target and push it onto history, so Back closes it. */
@@ -840,6 +874,7 @@ function clearDetail(): void {
   detailJourney = null
   detailStrip = null
   detailBoard = {departures: [], notices: []}
+  boardLineKey = null
   navDepth = 0
   followSelected = false
   recentring = false
@@ -919,6 +954,53 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
     return
   }
 
+  if (t.kind === 'journey') {
+    const bg = lineColors[t.line] ?? (t.product ? PRODUCT_COLORS[t.product] : '#666666')
+    panel.show({
+      title: t.line ? `${t.line}${t.product ? ` · ${PRODUCT_LABELS[t.product]}` : ''}` : 'Service',
+      subtitle: t.direction ? `to ${t.direction}` : undefined,
+      summary: t.stopName ? `Your stop · ${t.stopName}` : 'Full schedule',
+      accent: bg,
+      accentText: textOn(bg),
+      canGoBack: depthOf() > 1,
+      body: noticeBody('Loading the schedule…', 'loading')
+    })
+    setSelectedVehicle(null)
+    setFocusRoute(null)
+    setFocusStop(null)
+    followSelected = false
+    try {
+      const detail = await fetchJourneyDetail(t.id, signal)
+      if (signal.aborted) return
+      if (!detail) {
+        panel.updateBody(noticeBody('Could not load the schedule just now.', 'error'))
+        return
+      }
+      detailJourney = detail
+      const focusIndex = journeyFocusIndex(detail.stops, t.stopId, t.stopName)
+      renderJourneyDetail(focusIndex)
+      setFocusRoute(detail.path.length > 0 ? detail.path : null)
+      const focus = focusIndex >= 0 ? detail.stops[focusIndex] : null
+      const at = focus ? {lat: focus.lat, lon: focus.lon} : stationIndex.get(t.stopId ?? '') ?? null
+      setFocusStop(at)
+      if (at) {
+        const c = map.getCenter()
+        const far = Math.abs(c.lng - at.lon) > 0.04 || Math.abs(c.lat - at.lat) > 0.03 || map.getZoom() < 12.5
+        if (far) {
+          map.easeTo({center: [at.lon, at.lat], zoom: Math.max(map.getZoom(), 14), duration: 600})
+          setTimeout(() => keepClearOfPanel([at.lon, at.lat]), 650)
+        } else {
+          keepClearOfPanel([at.lon, at.lat])
+        }
+      }
+    } catch (err) {
+      if (signal.aborted) return
+      panel.updateBody(noticeBody('Could not load the schedule just now.', 'error'))
+      logError(`journey schedule failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return
+  }
+
   panel.show({
     title: t.name,
     subtitle: 'departures',
@@ -985,18 +1067,51 @@ function renderVehicleDetail(): VehicleView | null {
   return detailStrip
 }
 
+/** Render the open journey's full schedule; the poll has nothing to add to it. */
+function renderJourneyDetail(focusIndex: number): void {
+  const t = detailTarget
+  if (t?.kind !== 'journey' || !detailJourney) return
+  const view: JourneyView = journeyView(detailJourney, focusIndex, {
+    onStop: (id, name) => navigate({kind: 'stop', id, name})
+  })
+  panel.updateBody(view.body)
+  view.scrollToFocus()
+}
+
 function renderStopDetail(): void {
   if (detailTarget?.kind !== 'stop') return
+  const t = detailTarget
+  // A board refetch can take the chosen line out of the hour; fall back to All
+  // rather than leave a filter that can only show an empty board.
+  if (boardLineKey && !lineChipsFor(detailBoard.departures).some(c => c.key === boardLineKey)) {
+    boardLineKey = null
+  }
   panel.updateBody(stationView(detailBoard.departures, detailBoard.notices, berlinSecondsOfDay(new Date()), {
     labels: PRODUCT_LABELS,
     colourFor: d => lineColors[d.line] ?? (d.product ? PRODUCT_COLORS[d.product] : '#666666'),
     textFor: textOn,
+    activeLineKey: boardLineKey,
+    onLine: key => {
+      boardLineKey = key
+      renderStopDetail()
+    },
     onPick: d => {
       // The board's jid is the same id the radar uses, so a departure that is
-      // already moving opens its journey. One that has not left yet is not on the
-      // map, and there is nothing to show.
+      // already moving opens its journey panel. One that has not left yet is not
+      // on the map, but its full schedule is still one request away.
       const onMap = vehicles.find(x => x.id === d.jid)
       if (onMap) navigate({kind: 'vehicle', id: onMap.id})
+      else if (d.line) {
+        navigate({
+          kind: 'journey',
+          id: d.jid,
+          line: d.line,
+          product: d.product,
+          direction: d.direction,
+          stopId: t.id,
+          stopName: t.name
+        })
+      }
     }
   }))
 }
@@ -1309,12 +1424,23 @@ async function copyShareLink(btn: HTMLButtonElement): Promise<void> {
 /** Read the URL and show what it names. Runs on first load and on Back/Forward. */
 function applyUrl(): void {
   const q = new URLSearchParams(location.search)
-  const vehicle = q.get('vehicle')
-  const stop = q.get('stop')
-  if (vehicle) {
+  const journey = decodeJourneyState(location.search)
+  if (journey) {
+    void applyTarget({
+      kind: 'journey',
+      id: journey.id!, // decodeJourneyState only returns non-null with an id
+      line: journey.line ?? '',
+      product: journey.product ?? null,
+      direction: journey.direction ?? '',
+      stopId: journey.stopId ?? null,
+      stopName: journey.stopName ?? null
+    })
+  } else if (q.get('vehicle')) {
+    const vehicle = q.get('vehicle')!
     const v = vehicles.find(x => shortId(x.id) === vehicle || x.id === vehicle)
     void applyTarget({kind: 'vehicle', id: v?.id ?? vehicle})
-  } else if (stop) {
+  } else if (q.get('stop')) {
+    const stop = q.get('stop')!
     void applyTarget({kind: 'stop', id: stop, name: stationIndex.get(stop)?.name ?? 'Stop'})
   } else {
     clearDetail()
@@ -1450,6 +1576,7 @@ function focusLine(hit: {line: string; product: Product; key: string}): void {
   render()
   // a search result can be the first time a hidden mode is switched on
   requestRefresh()
+  persistFilters()
 
   const on = vehicles.filter(v => lineKey(v) === hit.key)
   if (on.length === 0) return
@@ -1506,6 +1633,15 @@ function runSearch(): void {
       tag.style.color = textOn(bg)
       tag.textContent = hit.line
       li.append(tag, label(PRODUCT_LABELS[hit.product], 'search-kind'))
+      const alertTitle = lineAlertTitle(hit.key)
+      if (alertTitle) {
+        const mark = document.createElement('span')
+        mark.className = 'search-alert'
+        mark.textContent = '⚠'
+        mark.setAttribute('aria-hidden', 'true')
+        mark.title = alertTitle
+        li.append(mark)
+      }
       li.onclick = () => { focusLine(hit); done() }
     } else {
       tag.classList.add('is-stop')
@@ -1621,6 +1757,7 @@ async function poll() {
       nextDelay = POLL_INTERVAL_MS
       conn = 'live'
       updateLiveLines([])
+      refreshLineNotices()
       render()
       onFreshData()
       return
@@ -1637,6 +1774,7 @@ async function poll() {
     conn = 'live'
     // the menus offer exactly what is running, so refresh them from every poll
     updateLiveLines(vehicles)
+    refreshLineNotices()
     // A `?vehicle=` link can only be resolved once there are vehicles to resolve
     // it against, so the first poll is the earliest this can run.
     if (!urlApplied) { urlApplied = true; applyUrl() }
@@ -1677,6 +1815,20 @@ document.addEventListener('visibilitychange', () => {
 
 // --- mode filters + layer toggles ---
 const filterEl = document.getElementById('filters')!
+// The header belongs to the phone sheet (desktop hides it via .filter-head);
+// the close button is what makes the sheet a sheet rather than a stuck panel.
+const filterHead = document.createElement('div')
+filterHead.className = 'filter-head'
+const filterTitle = document.createElement('h2')
+filterTitle.textContent = 'Map view'
+const filterClose = document.createElement('button')
+filterClose.type = 'button'
+filterClose.className = 'filter-close'
+filterClose.textContent = '✕'
+filterClose.setAttribute('aria-label', 'Close settings')
+filterClose.onclick = () => setSettingsOpen(false)
+filterHead.append(filterTitle, filterClose)
+filterEl.append(filterHead)
 
 /*
  * Responsive controls. The filter panel needs ~270 px and the status bar ~220 px;
@@ -1713,6 +1865,72 @@ applyCompact()
 setSettingsOpen(false)
 // tapping the map dismisses the panel, like any other overlay
 map.on('click', () => { if (document.body.classList.contains('settings-open')) setSettingsOpen(false) })
+
+// ─────────── line alerts: one pill for the whole map ───────────
+// A station board shows the notices that apply at that station; a construction
+// between stations belongs to a LINE, and the line menu only shows it when
+// someone already knows to look. The pill is the global view: when any running
+// line has a severe notice it sits bottom-centre, and tapping it lists the
+// lines — each row applies that line's filter, which is what a rider does next.
+const alertsRoot = document.createElement('div')
+alertsRoot.id = 'alerts'
+const alertsBtn = document.createElement('button')
+alertsBtn.type = 'button'
+alertsBtn.className = 'alerts-pill'
+alertsBtn.setAttribute('aria-expanded', 'false')
+const alertsPop = document.createElement('ul')
+alertsPop.className = 'alerts-pop'
+alertsPop.hidden = true
+alertsRoot.append(alertsBtn, alertsPop)
+document.body.append(alertsRoot)
+
+let alertsOpen = false
+const setAlertsOpen = (open: boolean): void => {
+  alertsOpen = open
+  alertsPop.hidden = !open
+  alertsBtn.setAttribute('aria-expanded', String(open))
+  alertsBtn.classList.toggle('is-open', open)
+}
+alertsBtn.onclick = () => setAlertsOpen(!alertsOpen)
+map.on('click', () => setAlertsOpen(false))
+
+function renderAlerts(): void {
+  const severe = [...lineNotices.values()].filter(a => a.notices.some(n => IMPORTANT_NOTICE_KINDS.has(n.kind)))
+  const n = severe.length
+  if (n === 0) {
+    alertsBtn.hidden = true
+    setAlertsOpen(false)
+    return
+  }
+  alertsBtn.hidden = false
+  alertsBtn.textContent = `⚠ ${n} ${n === 1 ? 'line alert' : 'line alerts'}`
+  alertsPop.replaceChildren()
+  for (const a of severe) {
+    const li = document.createElement('li')
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'alerts-row'
+    const bg = lineColors[a.line] ?? PRODUCT_COLORS[a.product as Product] ?? '#666666'
+    const badge = document.createElement('span')
+    badge.className = 'alerts-line'
+    badge.textContent = a.line
+    badge.style.background = bg
+    badge.style.color = textOn(bg)
+    const texts = a.notices.filter(x => IMPORTANT_NOTICE_KINDS.has(x.kind)).map(x => x.text)
+    const label = document.createElement('span')
+    label.className = 'alerts-text'
+    label.textContent = texts.slice(0, 2).join(' · ')
+    row.append(badge, label)
+    row.setAttribute('aria-label', `${a.line}: ${texts.join('. ')}`)
+    row.onclick = () => {
+      setAlertsOpen(false)
+      focusLine({line: a.line, product: a.product as Product, key: a.key})
+    }
+    li.append(row)
+    alertsPop.append(li)
+  }
+}
+
 /*
  * Two multi-select dropdowns: pick any set of types, then any set of lines.
  *
@@ -1746,6 +1964,34 @@ map.on('click', () => { if (document.body.classList.contains('settings-open')) s
  * not tell which was which.
  */
 const liveLines = new Map<string, LineSighting>()
+/**
+ * Notices per running line, folded from the vehicles each poll returns.
+ * Occupancy is already filtered out by the parser (see notice.ts).
+ */
+let lineNotices = new Map<string, LineNoticeAgg>()
+/** A cheap change detector so menus are not rebuilt on every identical poll. */
+let lastAlertsKey = ''
+
+/** The severe notices of one line, joined into one tooltip ('' when none). */
+function lineAlertTitle(key: string): string {
+  const agg = lineNotices.get(key)
+  if (!agg) return ''
+  return agg.notices
+    .filter(n => IMPORTANT_NOTICE_KINDS.has(n.kind))
+    .map(n => n.text)
+    .join(' · ')
+}
+
+/** Fold the current poll's vehicles into `lineNotices` and refresh the UI. */
+function refreshLineNotices(): void {
+  const next = aggregateLineNotices(vehicles)
+  const key = JSON.stringify([...next].map(([k, a]) => [k, a.notices.map(n => `${n.kind}:${n.text}`)]))
+  if (key === lastAlertsKey) return
+  lastAlertsKey = key
+  lineNotices = next
+  renderAlerts()
+  rebuildLines()
+}
 
 /**
  * Keep a line in the menu this long after its last sighting.
@@ -1806,8 +2052,40 @@ const matchesSearch = (name: string): boolean =>
  */
 const presentTypes = (): Product[] => Object.keys(PRODUCT_LABELS) as Product[]
 
+/** Write the current selection to storage, quietly. */
+function persistFilters(): void {
+  try {
+    localStorage.setItem(FILTERS_KEY, encodeFilterPrefs({
+      types: presentTypes().filter(p => filters[p]),
+      lineMode,
+      lines: lineMode === 'custom' ? [...lineFilter] : []
+    }))
+  } catch {
+    // storage unavailable — the session still works, it just won't be remembered
+  }
+}
+
+/** Back to the shipped defaults: rail modes on, no line filter, no saved state. */
+function resetFilters(): void {
+  for (const p of Object.keys(filters) as Product[]) filters[p] = false
+  filters.suburban = true
+  filters.subway = true
+  filters.tram = true
+  lineMode = 'all'
+  lineFilter = new Set()
+  try {
+    localStorage.removeItem(FILTERS_KEY)
+  } catch {
+    // ignore — resetting the live view matters, forgetting it is best-effort
+  }
+  rebuildTypes()
+  rebuildLines()
+  render()
+  requestRefresh()
+}
+
 /** One checkbox row. `onSet` receives the new checked state. */
-function checkRow(text: string, checked: boolean, onSet: (on: boolean) => void, colour?: string) {
+function checkRow(text: string, checked: boolean, onSet: (on: boolean) => void, colour?: string, alert?: string) {
   const label = document.createElement('label')
   label.className = 'layer'
   const cb = document.createElement('input')
@@ -1820,6 +2098,14 @@ function checkRow(text: string, checked: boolean, onSet: (on: boolean) => void, 
     dot.style.color = colour
     dot.textContent = ' ●'
     label.append(dot)
+  }
+  if (alert) {
+    const mark = document.createElement('span')
+    mark.className = 'layer-alert'
+    mark.textContent = '⚠'
+    mark.setAttribute('aria-hidden', 'true')
+    mark.title = alert
+    label.append(mark)
   }
   return label
 }
@@ -1873,6 +2159,7 @@ function rebuildTypes() {
       rebuildLines()
       render()
       requestRefresh()
+      persistFilters()
     })
   )
   for (const p of types) {
@@ -1884,6 +2171,7 @@ function rebuildTypes() {
       rebuildLines()
       render()
       requestRefresh()
+      persistFilters()
     }, PRODUCT_COLORS[p]))
   }
   typeUi.caption.textContent = describeTypes()
@@ -1948,6 +2236,7 @@ function rebuildLines() {
       }
       rebuildLines()
       render()
+      persistFilters()
     })
   )
   let shown = 0
@@ -1971,7 +2260,8 @@ function rebuildLines() {
         if (all.every(x => lineFilter.has(lineKey(x)))) lineMode = 'all'
         rebuildLines()
         render()
-      }))
+        persistFilters()
+      }, undefined, lineAlertTitle(lineKey(e)) || undefined))
     }
   }
   if (shown === 0) lineList.append(hint(`no line matches "${query}"`))
@@ -2021,6 +2311,12 @@ shareBtn.textContent = 'Copy link'
 shareBtn.title = 'Copy a link to this view'
 shareBtn.onclick = () => { void copyShareLink(shareBtn) }
 shareRow.append(shareBtn)
+const resetBtn = document.createElement('button')
+resetBtn.type = 'button'
+resetBtn.textContent = 'Reset'
+resetBtn.title = 'Back to the rail-only default and forget the saved filters'
+resetBtn.onclick = resetFilters
+shareRow.append(resetBtn)
 filterEl.append(shareRow)
 
 // --- one Debug switch for the whole test overlay ---
@@ -2050,6 +2346,17 @@ debugCb.type = 'checkbox'
 debugCb.checked = DEBUG_AVAILABLE && (debugRequested || localStorage.getItem(DEBUG_KEY) === '1')
 debugLabel.append(debugCb, ' Debug view')
 if (DEBUG_AVAILABLE) filterEl.append(debugLabel, debugGroup)
+
+// The service worker only exists in production builds: it caches the static
+// shell for instant return visits and offline resilience. Live data is fetched
+// per poll and is never part of that cache.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(asset('sw.js')).catch(() => {
+      // a failed registration changes nothing the visitor can see
+    })
+  })
+}
 
 // Targets: next-stop dots + animated segment paths. Not built with toggleLayer,
 // because these three layers depend on the Debug switch as well as their own box.

@@ -1,5 +1,28 @@
+/* ─── design tokens ─────────────────────────────────────────────
+ * One vocabulary for the overlays: radii, shadows, ink colours and the
+ * 44 px touch target the interactive controls are held to.
+ */
+:root {
+  --accent: #1565c0;
+  --danger: #b3261e;
+  --ink: #1c2026;
+  --ink-dim: #5f6368;
+  --ink-faint: #8a9096;
+  --card-bg: rgba(255,255,255,.96);
+  --card-solid: #ffffff;
+  --line: rgba(15,23,42,.16);
+  --line-soft: rgba(15,23,42,.07);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --shadow-card: 0 1px 3px rgba(15,23,42,.12), 0 8px 24px rgba(15,23,42,.12);
+  --shadow-ctl: 0 1px 2px rgba(15,23,42,.16);
+  --ring: 0 0 0 2px #fff, 0 0 0 4px var(--accent);
+}
 html, body, #map { height: 100%; margin: 0; }
-body { font: 13px system-ui, sans-serif; }
+body { font: 13px/1.45 system-ui, sans-serif; color: var(--ink); }
+button { font-family: inherit; }
+
 /*
  * Overlay panels must fit ANY window. Every one is capped against the viewport
  * and scrolls internally rather than spilling off-screen, and #settings-toggle
@@ -8,47 +31,72 @@ body { font: 13px system-ui, sans-serif; }
  */
 #statusbar {
   position: fixed; top: 10px; left: 10px; z-index: 1000;
-  background: rgba(255,255,255,.92); padding: 6px 10px; border-radius: 6px;
-  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  background: var(--card-bg); padding: 7px 12px; border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card); border: 1px solid var(--line);
   box-sizing: border-box; max-width: calc(100vw - 76px);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #filters {
   position: fixed; top: 10px; right: 10px; z-index: 1001;
-  background: rgba(255,255,255,.92); padding: 8px 10px; border-radius: 6px;
-  box-shadow: 0 1px 4px rgba(0,0,0,.3);
-  box-sizing: border-box;
+  background: var(--card-bg); border: 1px solid var(--line);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-card);
+  box-sizing: border-box; padding: 10px 12px 12px;
   max-width: calc(100vw - 20px); max-height: calc(100vh - 20px); overflow: auto;
+  overscroll-behavior: contain;
 }
 
-/* Settings button — shown only while the panel is collapsed. */
+/* Settings button — shown only while the panel is collapsed on a phone. */
 #settings-toggle {
   display: none;
   position: fixed; top: 10px; right: 10px; z-index: 1002;
-  width: 40px; height: 40px; padding: 0;
+  width: 44px; height: 44px; padding: 0;
   align-items: center; justify-content: center;
-  font: 18px/1 system-ui; cursor: pointer;
-  background: rgba(255,255,255,.94); color: #333;
-  border: 1px solid #bbb; border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  font: 19px/1 system-ui; cursor: pointer;
+  background: var(--card-solid); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  transition: transform .15s ease-out, box-shadow .15s ease-out;
 }
-#settings-toggle:hover { background: #fff; }
+#settings-toggle:hover { transform: translateY(-1px); box-shadow: var(--shadow-ctl), var(--shadow-card); }
+#settings-toggle:active { transform: translateY(0); }
 body.compact #settings-toggle { display: flex; }
 body.compact #filters { display: none; }
-/* opened: sits below the button and can never exceed the window */
-body.compact.settings-open #filters {
-  display: block; top: 58px;
-  max-height: calc(100vh - 68px);
+
+/* The panel header exists for the phone sheet; the desktop card does not show it. */
+.filter-head { display: none; }
+
+#filters .mode { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
+#filters .mode:first-child { margin-top: 0; }
+#filters .layer {
+  display: flex; align-items: center; gap: 9px;
+  min-height: 32px; margin: 1px -8px; padding: 4px 10px;
+  border-radius: var(--radius-sm); cursor: pointer; color: var(--ink);
+  transition: background-color .12s ease-out;
 }
-#filters .mode { display: flex; gap: 6px; margin-bottom: 6px; }
-#filters .layer { display: block; margin: 2px 0; cursor: pointer; }
-#filters .rec-status { color: #666; font: 11px ui-monospace, Menlo, monospace; }
-#filters button { font: 11px system-ui; padding: 2px 6px; cursor: pointer;
-  border: 1px solid #999; border-radius: 3px; background: #fff; }
-#filters button:disabled { color: #aaa; border-color: #ddd; cursor: default; }
+#filters .layer:hover { background: var(--line-soft); }
+#filters .layer input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+#filters .rec-status { color: var(--ink-dim); font: 11px ui-monospace, Menlo, monospace; }
+#filters button {
+  font: 600 12px/1 system-ui; padding: 9px 13px; cursor: pointer;
+  color: var(--ink); background: var(--card-solid);
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-ctl); transition: background-color .12s ease-out, transform .12s ease-out;
+}
+#filters button:hover { background: #f2f5f9; }
+#filters button:active { transform: translateY(1px); }
+#filters button:disabled { color: var(--ink-faint); border-color: var(--line-soft); box-shadow: none; cursor: default; }
+
 /* status bar colours track the connection state */
 #statusbar[data-state='stale'] { color: #8a5a00; }
-#statusbar[data-state='offline'] { color: #b3261e; }
+#statusbar[data-state='offline'] { color: var(--danger); }
+
+/* Keyboard focus is always visible on the controls that take it. */
+#settings-toggle:focus-visible,
+#filters button:focus-visible,
+#filters summary:focus-visible,
+#filters input:focus-visible {
+  outline: none; box-shadow: var(--ring);
+}
 
 /* error log — debug view only; hidden until something is actually logged */
 /*
@@ -124,7 +172,6 @@ body.debug .maplibregl-popup-content .pid {
   #statusbar { top: 8px; left: 8px; font-size: 12px; }
   #settings-toggle { top: 8px; right: 8px; }
   #debuglog { top: 56px; left: 8px; right: 8px; }
-  body.compact.settings-open #filters { top: 56px; right: 8px; left: 8px; max-width: none; }
 }
 
 /*
@@ -133,24 +180,34 @@ body.debug .maplibregl-popup-content .pid {
  * to unusable on touch. The summary carries the current choice, so the panel
  * stays one line per filter until you open it.
  */
-#filters .multi { margin-bottom: 6px; }
+#filters .multi { margin: 10px 0 0; }
 #filters .multi > summary {
-  cursor: pointer; padding: 2px 4px; border-radius: 3px;
-  border: 1px solid #999; background: #fff; list-style-position: inside;
+  display: flex; align-items: center; gap: 8px;
+  min-height: 38px; padding: 6px 12px; box-sizing: border-box;
+  cursor: pointer; list-style: none;
+  color: var(--ink); background: var(--card-solid);
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-ctl);
+  transition: background-color .12s ease-out, border-color .12s ease-out;
 }
-#filters .multi > summary:hover { background: #f4f4f4; }
-#filters .multi-caption { color: #333; font-weight: 600; }
+#filters .multi > summary::-webkit-details-marker { display: none; }
+#filters .multi > summary::after {
+  content: '▾'; margin-left: auto; color: var(--ink-faint);
+  transition: transform .15s ease-out;
+}
+#filters .multi[open] > summary::after { transform: rotate(180deg); }
+#filters .multi > summary:hover { background: #f2f5f9; }
+#filters .multi-caption { color: var(--ink); font-weight: 700; }
 /* the long line list must scroll rather than push the panel off-screen */
 #filters .multi-body {
-  max-height: 210px; overflow: auto;
-  margin: 4px 0 0 2px; padding-left: 4px; border-left: 2px solid #eee;
+  margin: 6px 0 0; padding: 2px 4px 2px 2px;
 }
 #filters .multi-group {
-  margin: 4px 0 1px; color: #666; font: 600 10px system-ui;
-  text-transform: uppercase; letter-spacing: .04em;
+  margin: 8px 2px 2px; color: var(--ink-dim); font: 700 10px/1.3 system-ui;
+  text-transform: uppercase; letter-spacing: .05em;
 }
 /* the menus hold only lines that are running, so they can be empty for a moment */
-#filters .multi-hint { color: #888; font-style: italic; padding: 2px 0; }
+#filters .multi-hint { color: var(--ink-dim); font-style: italic; padding: 4px 6px; }
 /*
  * Line search. With every mode on, about 260 lines run at once and 187 are
  * buses, so the list needs a way in. The field sits OUTSIDE .multi-list, which is
@@ -158,10 +215,15 @@ body.debug .maplibregl-popup-content .pid {
  */
 #filters .multi-search {
   width: 100%; box-sizing: border-box; margin: 4px 0 2px;
-  padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px; font: inherit;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font: inherit; color: var(--ink); background: var(--card-solid);
+  outline: none;
 }
 #filters .multi-body { max-height: none; overflow: visible; }
-#filters .multi-list { max-height: 210px; overflow: auto; }
+#filters .multi-list {
+  max-height: 210px; overflow: auto; overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
 
 /* ─────────── detail panel ───────────
  * Two shapes for one component, because a phone and a laptop want different
@@ -262,6 +324,15 @@ body.debug .maplibregl-popup-content .pid {
 }
 #detail .vdelay.is-late { background: #fdecea; color: #b3261e; }
 #detail .vdelay.is-early { background: #eaf3fd; color: #0b5aa8; }
+#detail .vnotice {
+  margin: 0 0 8px; padding: 6px 9px; border-radius: 6px;
+  font: 500 12px/16px system-ui; overflow-wrap: anywhere;
+}
+#detail .vnotice-construction,
+#detail .vnotice-disruption,
+#detail .vnotice-elevator { background: #fdecea; color: #b3261e; }
+#detail .vnotice-information,
+#detail .vnotice-other { background: #eef2f6; color: #333; }
 #detail .est-note {
   margin: 14px 0 0; color: #888; font: italic 11px/15px system-ui;
   border-top: 1px solid #eee; padding-top: 8px;
@@ -306,6 +377,11 @@ body.debug .maplibregl-popup-content .pid {
 #detail .strip-row.is-next .strip-name { font-weight: 700; }
 #detail .strip-row.is-next .strip-dot { border-color: #1565c0; width: 13px; height: 13px; }
 #detail .strip-row.is-cancelled .strip-name { text-decoration: line-through; color: #b3261e; }
+/* The stop whose board opened a full schedule: the row the reader came for. */
+#detail .strip-row.is-focus { background: rgba(21,101,192,.07); border-radius: 6px; }
+#detail .strip-row.is-focus .strip-name { font-weight: 700; }
+#detail .strip-row.is-focus .strip-dot { border-color: var(--accent); background: var(--accent); }
+#detail .strip-here { font: 600 11px/1.4 system-ui; color: var(--accent); white-space: nowrap; }
 #detail .strip-row.is-tappable { cursor: pointer; border-radius: 4px; }
 #detail .strip-row.is-tappable:hover { background: #f4f6f8; }
 /* The vehicle on the strip: a filled marker on the rail, moving between dots. */
@@ -366,6 +442,29 @@ body.debug .maplibregl-popup-content .pid {
 #detail .dep.is-cancelled .dep-dir { text-decoration: line-through; color: #b3261e; }
 #detail .dep.is-cancelled .dep-eta { color: #b3261e; font-size: 11px; }
 
+/* One line out of a busy board: the chips row above the groups. */
+#detail .chips {
+  display: flex; gap: 6px; margin: 0 0 12px; padding-bottom: 2px;
+  overflow-x: auto; scrollbar-width: none;
+}
+#detail .chips::-webkit-scrollbar { display: none; }
+#detail .chips .chip {
+  flex: none; min-height: 32px; padding: 4px 13px;
+  font: 700 12px/1.5 system-ui; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--card-solid); color: var(--ink-dim);
+  box-shadow: none; transition: transform .12s ease-out, background-color .12s ease-out;
+}
+#detail .chips .chip:hover { transform: translateY(-1px); }
+#detail .chips .chip:active { transform: none; }
+#detail .chips .chip.is-active {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+#detail .chips .chip:focus-visible { outline: none; box-shadow: var(--ring); }
+@media (pointer: coarse) {
+  #detail .chips .chip { min-height: 44px; }
+}
+
 /* ─────────── search ───────────
  * Top centre on a wide window, full width on a phone: the one control people
  * reach for first should not be hidden behind a settings gear.
@@ -376,20 +475,22 @@ body.debug .maplibregl-popup-content .pid {
 }
 #search-input {
   width: 100%; box-sizing: border-box; height: 38px; padding: 0 12px;
-  border: 1px solid #bbb; border-radius: 8px; background: rgba(255,255,255,.96);
-  font: 14px system-ui; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  background: var(--card-bg); color: var(--ink);
+  font: 14px system-ui; box-shadow: var(--shadow-card);
 }
 #search-input:focus { outline: 2px solid #1565c0; outline-offset: 1px; }
 #search-results {
   list-style: none; margin: 6px 0 0; padding: 4px;
   max-height: min(50vh, 340px); overflow-y: auto;
-  background: #fff; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.28);
+  background: var(--card-solid); border-radius: var(--radius-md);
+  box-shadow: 0 2px 12px rgba(15,23,42,.2), 0 8px 24px rgba(15,23,42,.14);
 }
 #search-results .search-hit {
   display: flex; align-items: center; gap: 8px;
   min-height: 44px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
 }
-#search-results .search-hit:hover { background: #eef2f6; }
+#search-results .search-hit:hover { background: var(--line-soft); }
 #search-results .search-tag {
   flex: none; min-width: 30px; padding: 2px 6px; border-radius: 10px;
   font: 700 12px/16px system-ui; text-align: center;
@@ -446,4 +547,115 @@ body.dense.has-selection .veh.is-selected {
 }
 @media (prefers-reduced-motion: no-preference) {
   .veh { transition: opacity .18s ease-out, box-shadow .18s ease-out; }
+}
+
+/* Marks on lines with an active disruption: menu rows, search hits. */
+#filters .layer-alert,
+#search-results .search-alert {
+  margin-left: auto; color: var(--danger); font-size: 12px; flex: none;
+}
+
+/* ─────────── the line-alerts pill ───────────
+ * Bottom centre, out of the way of the search box and both panels. It appears
+ * only while at least one fetched line carries a severe notice.
+ */
+#alerts {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 1001; display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+body.detail-open #alerts,
+body.settings-open #alerts { display: none; }
+.alerts-pill {
+  min-height: 40px; padding: 8px 18px; border: 0; border-radius: 999px;
+  background: var(--danger); color: #fff; cursor: pointer;
+  font: 700 13px/1.4 system-ui;
+  box-shadow: 0 4px 16px rgba(179,38,30,.35);
+  transition: transform .12s ease-out, box-shadow .12s ease-out;
+}
+.alerts-pill:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(179,38,30,.42); }
+.alerts-pill:focus-visible { outline: none; box-shadow: var(--ring); }
+.alerts-pop {
+  list-style: none; margin: 0; padding: 6px;
+  width: min(360px, calc(100vw - 24px)); max-height: 40vh; overflow-y: auto;
+  background: var(--card-solid); border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(15,23,42,.24); border: 1px solid var(--line);
+}
+.alerts-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  min-height: 44px; padding: 6px 10px; box-sizing: border-box;
+  border: 0; border-radius: var(--radius-sm); cursor: pointer;
+  background: transparent; color: var(--ink); text-align: left;
+}
+.alerts-row:hover { background: var(--line-soft); }
+.alerts-line {
+  flex: none; min-width: 32px; padding: 2px 7px; border-radius: 10px;
+  font: 700 12px/16px system-ui; text-align: center;
+}
+.alerts-text { font: 400 12px/1.45 system-ui; color: var(--ink); overflow-wrap: anywhere; }
+
+/* ─────────── settings sheet on a phone ───────────
+ * The same #filters card becomes a bottom sheet when the window is compact:
+ * full width, rounded top, a grab handle and a sticky header, with the lists
+ * scrolling inside. Closed it sits below the viewport edge, still in the DOM
+ * so opening it animates instead of popping in.
+ */
+body.compact #filters {
+  display: flex; flex-direction: column;
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+  width: auto; max-width: none; max-height: 84vh;
+  border: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: 10px 16px max(16px, env(safe-area-inset-bottom));
+  overflow-x: hidden; overflow-y: auto;
+  background: var(--card-solid);
+  box-shadow: 0 -16px 48px rgba(15,23,42,.24);
+  transform: translateY(calc(100% + 24px));
+  visibility: hidden; pointer-events: none;
+  transition: transform .24s ease-out, visibility 0s linear .24s;
+}
+body.compact.settings-open #filters {
+  transform: none; visibility: visible; pointer-events: auto;
+  transition: transform .24s ease-out, visibility 0s;
+}
+body.compact #filters .filter-head {
+  display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 2;
+  margin: 0 -16px 10px; padding: 16px 16px 10px;
+  background: var(--card-solid);
+}
+body.compact #filters .filter-head::before {
+  content: ''; position: absolute; top: 6px; left: 50%; width: 36px; height: 4px;
+  transform: translateX(-50%); border-radius: 2px; background: rgba(15,23,42,.2);
+}
+body.compact #filters .filter-head h2 {
+  margin: 0; font: 700 16px/1.2 system-ui; color: var(--ink);
+}
+body.compact #filters .filter-head .filter-close {
+  flex: none; width: 40px; height: 40px; margin: -6px -8px;
+  padding: 0; border: 0; background: transparent; box-shadow: none;
+  border-radius: 50%; color: var(--ink-dim); font: 500 19px/1 system-ui;
+}
+body.compact #filters .filter-head .filter-close:hover { background: var(--line-soft); }
+body.compact #filters .filter-head .filter-close:active { transform: none; }
+body.compact #filters .multi-list { max-height: min(36vh, 320px); }
+body.compact #filters .multi { margin-top: 8px; }
+
+/* Bigger, cleaner touch targets where a finger is the pointer. */
+@media (pointer: coarse) {
+  #filters .layer { min-height: 44px; }
+  #filters .multi > summary { min-height: 44px; }
+  #filters .multi-search { padding: 11px 12px; }
+  #filters button { padding: 12px 15px; }
+  /* The strip's 34 px rows stay visually tight, but the tap zone grows. */
+  #detail .strip-row.is-tappable::after {
+    content: ''; position: absolute; left: 50%; top: 50%;
+    width: 44px; height: 44px; transform: translate(-50%, -50%);
+    border-radius: 10px;
+  }
+}
+
+/* Tappable rows announce their focus the same way buttons do. */
+#detail .strip-row.is-tappable:focus-visible,
+#detail .dep.is-tappable:focus-visible,
+#search-results .search-hit:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px;
 }

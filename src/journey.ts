@@ -15,6 +15,11 @@
 import {decodePolyline} from './polyline.js'
 import {timeToSeconds} from './format.js'
 import {productFromCls, type Product} from './vehicle.js'
+import {dedupeNotices, noticeFromRem, type RawMsg, type RawRem, type StationNotice} from './notice.js'
+
+// Consumers keep importing these from here; the implementation lives in the
+// shared notice module so the radar can reuse it without an import cycle.
+export type {NoticeKind, StationNotice} from './notice.js'
 
 /** One stop on a journey, in order, with the time the vehicle is there. */
 export interface JourneyStop {
@@ -143,71 +148,11 @@ export interface Departure {
   notices?: StationNotice[]
 }
 
-/** Rough category for a HAFAS `remL` notice, decided from its code. */
-export type NoticeKind =
-  | 'information'
-  | 'construction'
-  | 'disruption'
-  | 'elevator'
-  | 'occupancy'
-  | 'other'
-
-export interface StationNotice {
-  text: string
-  kind: NoticeKind
-}
-
 /** A parsed departure board: the departures plus station-level notices. */
 export interface StationBoardPage {
   departures: Departure[]
   /** Notices attached to the station rather than one particular journey. */
   notices: StationNotice[]
-}
-
-interface RawRem {
-  code?: string
-  txtN?: string
-  txtL?: string
-  txtS?: string
-  type?: string
-}
-
-interface RawMsg {
-  remX?: number
-}
-
-function classifyRem(rem: RawRem): NoticeKind {
-  const code = (rem.code ?? '').toLowerCase()
-  if (code.startsWith('text.occup')) return 'occupancy'
-  if (code.includes('elevator') || code.includes('aufzug')) return 'elevator'
-  if (code.includes('construction') || code.includes('baustelle') || code.includes('bauarbeiten')) return 'construction'
-  if (code.includes('disruption') || code.includes('stoerung') || code.includes('störung')) return 'disruption'
-  return 'information'
-}
-
-/**
- * A `remX` index into `common.remL`, as human text. Operator rows are dropped:
- * "S-Bahn Berlin GmbH" is metadata, not something a rider needs on a board.
- */
-function noticeFromRem(remX: number | undefined, remL: RawRem[]): StationNotice | null {
-  if (remX == null) return null
-  const rem = remL[remX]
-  if (!rem || rem.code === 'OPERATOR') return null
-  const text = rem.txtN ?? rem.txtL ?? rem.txtS
-  if (!text) return null
-  return {text, kind: classifyRem(rem)}
-}
-
-function dedupeNotices(list: StationNotice[]): StationNotice[] {
-  const seen = new Set<string>()
-  const out: StationNotice[] = []
-  for (const n of list) {
-    const key = `${n.kind}:${n.text}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(n)
-  }
-  return out
 }
 
 /**

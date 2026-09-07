@@ -29,7 +29,7 @@ operator's forecast polyline, which is road geometry for the next 30 seconds.
 ```sh
 npm install
 npm run build          # -> dist/
-npm test               # 268 tests
+npm test               # 301 tests
 npm run dev            # http://localhost:5173
 ```
 
@@ -42,6 +42,10 @@ npm run prepare:data   # downloads ~600 MB of GTFS, writes public/*.json
 
 That script refuses to write if its checks fail, so a bad feed cannot overwrite
 good data.
+
+The raster app icons and the social-preview image are committed; regenerate
+them only when the visual identity changes (`python3 scripts/make-icons.py`,
+requires Pillow).
 
 ## Deploy
 

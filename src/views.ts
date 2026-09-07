@@ -5,8 +5,12 @@
 // untangling what changed.
 
 import {clockTime, delayLabel, etaLabel, minutesUntil} from './format.js'
-import type {Departure, JourneyDetail, StationNotice} from './journey.js'
+import type {Departure, JourneyDetail, JourneyStop, StationNotice} from './journey.js'
+import {compareLineNames} from './vehicle.js'
 import type {Product, Vehicle} from './vehicle.js'
+
+/** The order the departure groups use, and chips inherit: local modes first. */
+const PRODUCT_ORDER: Product[] = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'regional', 'express']
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K, className?: string, text?: string
@@ -38,6 +42,67 @@ export function arrivalSummary(v: Vehicle, nowSec: number): {next: string; time:
   const minutes = t ? minutesUntil(t, nowSec) : null
   const eta = minutes === null ? null : etaLabel(minutes)
   return {next, time, eta}
+}
+
+/**
+ * The key a departure contributes to under: mode AND line, never the name
+ * alone — the same rule as everywhere else in the app.
+ */
+const departureKey = (d: Pick<Departure, 'line' | 'product'>): string =>
+  `${d.product ?? 'other'}:${d.line}`
+
+export interface LineChip {
+  key: string
+  line: string
+  product: Product | null
+  count: number
+}
+
+/** The distinct lines on a board, in menu order, each with its row count. */
+export function lineChipsFor(departures: Iterable<Departure>): LineChip[] {
+  const by = new Map<string, LineChip>()
+  for (const d of departures) {
+    if (!d.line) continue
+    const key = departureKey(d)
+    const cur = by.get(key)
+    if (cur) cur.count++
+    else by.set(key, {key, line: d.line, product: d.product, count: 1})
+  }
+  return [...by.values()].sort((a, b) => {
+    if (a.product !== b.product) {
+      const ia = a.product ? PRODUCT_ORDER.indexOf(a.product) : PRODUCT_ORDER.length
+      const ib = b.product ? PRODUCT_ORDER.indexOf(b.product) : PRODUCT_ORDER.length
+      if (ia !== ib) return ia - ib
+    }
+    return compareLineNames(a.line, b.line)
+  })
+}
+
+/** Narrow a board to one line key, or return everything when `key` is null. */
+export function departuresForLine(departures: Departure[], key: string | null): Departure[] {
+  if (!key) return departures
+  return departures.filter(d => departureKey(d) === key)
+}
+
+/**
+ * Where "your stop" sits in a full journey: by extId first (platform-level ids
+ * merged into one station id can differ), then by name. -1 when it is not on
+ * the trip at all.
+ */
+export function journeyFocusIndex(
+  stops: ReadonlyArray<Pick<JourneyStop, 'id' | 'name'>>,
+  stopId: string | null,
+  stopName: string | null
+): number {
+  if (stopId) {
+    const byId = stops.findIndex(s => s.id === stopId)
+    if (byId !== -1) return byId
+  }
+  if (stopName) {
+    const byName = stops.findIndex(s => s.name === stopName)
+    if (byName !== -1) return byName
+  }
+  return -1
 }
 
 export interface VehicleView {
@@ -76,6 +141,9 @@ export function vehicleView(
     const late = (v.delayMs ?? 0) > 0
     body.append(el('p', `vdelay ${late ? 'is-late' : 'is-early'}`, `${late ? 'running late' : 'running early'} · ${delay}`))
   }
+  if (v.notices?.length) {
+    for (const n of v.notices) body.append(el('p', `vnotice vnotice-${n.kind}`, n.text))
+  }
 
   if (!detail || detail.stops.length === 0) {
     body.append(noticeBody('The full route for this vehicle is not available.', 'empty'))
@@ -86,34 +154,10 @@ export function vehicleView(
   const strip = el('ol', 'strip')
   const rows: HTMLElement[] = []
   detail.stops.forEach((stop, i) => {
-    const row = el('li', 'strip-row')
-    if (stop.passed) row.classList.add('is-passed')
-    if (i === targetIndex) row.classList.add('is-next')
-    if (stop.cancelled) row.classList.add('is-cancelled')
-
-    const time = el('span', 'strip-time', clockTime(stop.time ?? undefined))
-    const d = stop.delaySec
-    if (d != null && Math.abs(d) >= 60) {
-      time.append(el('em', 'strip-delay', d > 0 ? `+${Math.round(d / 60)}` : `${Math.round(d / 60)}`))
-    }
-    const dot = el('span', 'strip-dot')
-    dot.setAttribute('aria-hidden', 'true')
-    const name = el('span', 'strip-name', stop.name)
-
-    row.append(time, dot, name)
-    // A stop on the strip is a way into that stop's own departures.
-    if (stop.id && opts.onStop) {
-      const id = stop.id
-      row.classList.add('is-tappable')
-      row.tabIndex = 0
-      row.setAttribute('role', 'button')
-      row.setAttribute('aria-label', `${stop.name}, departures`)
-      const go = () => opts.onStop?.(id, stop.name)
-      row.onclick = go
-      row.onkeydown = e => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go() }
-      }
-    }
+    const classes: string[] = []
+    if (stop.passed) classes.push('is-passed')
+    if (i === targetIndex) classes.push('is-next')
+    const row = stripRow(stop, classes, {onStop: opts.onStop})
     rows.push(row)
     strip.append(row)
   })
@@ -161,6 +205,84 @@ export function vehicleView(
   return {body, setProgress, scrollToVehicle}
 }
 
+/** One row of the journey strip: time, dot, name, optional stop-board tap. */
+function stripRow(
+  stop: JourneyStop,
+  extra: string[],
+  opts: {onStop?: (stopId: string, name: string) => void}
+): HTMLElement {
+  const row = el('li', 'strip-row')
+  for (const c of extra) row.classList.add(c)
+  if (stop.cancelled) row.classList.add('is-cancelled')
+
+  const time = el('span', 'strip-time', clockTime(stop.time ?? undefined))
+  const d = stop.delaySec
+  if (d != null && Math.abs(d) >= 60) {
+    time.append(el('em', 'strip-delay', d > 0 ? `+${Math.round(d / 60)}` : `${Math.round(d / 60)}`))
+  }
+  const dot = el('span', 'strip-dot')
+  dot.setAttribute('aria-hidden', 'true')
+  const name = el('span', 'strip-name', stop.name)
+  row.append(time, dot, name)
+  // A stop on the strip is a way into that stop's own departures.
+  if (stop.id && opts.onStop) {
+    const id = stop.id
+    row.classList.add('is-tappable')
+    row.tabIndex = 0
+    row.setAttribute('role', 'button')
+    row.setAttribute('aria-label', `${stop.name}, departures`)
+    const go = () => opts.onStop?.(id, stop.name)
+    row.onclick = go
+    row.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go() }
+    }
+  }
+  return row
+}
+
+export interface JourneyView {
+  body: HTMLElement
+  scrollToFocus(): void
+}
+
+/**
+ * A service's full schedule, for a departure that has not left yet.
+ *
+ * The vehicle strip marks where the vehicle is between two stops; this marks
+ * where the RIDER is — the stop whose board the schedule was opened from — so
+ * the row to read is found without scrolling a whole journey.
+ */
+export function journeyView(
+  detail: JourneyDetail,
+  focusIndex: number,
+  opts: {onStop?: (stopId: string, name: string) => void} = {}
+): JourneyView {
+  const body = el('div', 'vdetail journey-detail')
+  const strip = el('ol', 'strip')
+  const rows: HTMLElement[] = []
+  detail.stops.forEach((stop, i) => {
+    const row = stripRow(stop, i === focusIndex ? ['is-focus'] : [], {onStop: opts.onStop})
+    if (i === focusIndex) {
+      row.title = 'The stop whose departures opened this schedule'
+      const name = row.querySelector('.strip-name')
+      name?.append(el('span', 'strip-here', ' · your stop'))
+    }
+    rows.push(row)
+    strip.append(row)
+  })
+  body.append(strip)
+  body.append(estimateNote())
+
+  const scrollToFocus = (): void => {
+    if (focusIndex < 0 || rows.length === 0) return
+    const row = rows[Math.min(focusIndex, rows.length - 1)]
+    const box = body.parentElement
+    if (!box) return
+    box.scrollTop = Math.max(0, row.offsetTop - box.clientHeight * 0.45)
+  }
+  return {body, scrollToFocus}
+}
+
 /** The same honesty the map popup carries: this position is modelled. */
 function estimateNote(): HTMLElement {
   return el('p', 'est-note', 'Times and position come from the timetable plus the live delay, not from GPS.')
@@ -182,6 +304,9 @@ export function stationView(
     colourFor: (d: Departure) => string
     textFor: (bg: string) => string
     onPick?: (d: Departure) => void
+    /** The chip selection, if the caller wants one. */
+    activeLineKey?: string | null
+    onLine?: (key: string | null) => void
   }
 ): HTMLElement {
   const body = el('div', 'sdetail')
@@ -191,14 +316,48 @@ export function stationView(
     body.append(banner)
   }
   const upcoming = departures.filter(d => (minutesUntil(d.time ?? undefined, nowSec) ?? -1) >= 0)
-  if (upcoming.length === 0) {
+  const chips = lineChipsFor(upcoming)
+  const active = opts.activeLineKey ?? null
+  const filtered = departuresForLine(upcoming, active)
+  // The filter is pointless when the board has one line; keep the row to
+  // "All" only when there is something to switch back from.
+  const showChips = Boolean(opts.onLine && chips.length > 1)
+
+  const chipsRow = (): HTMLElement => {
+    const bar = el('div', 'chips')
+    const all = el('button', `chip ${active ? '' : 'is-active'}`)
+    all.type = 'button'
+    all.setAttribute('aria-pressed', String(!active))
+    all.textContent = 'All'
+    all.onclick = () => opts.onLine?.(null)
+    bar.append(all)
+    for (const c of chips) {
+      const sample = upcoming.find(d => departureKey(d) === c.key)
+      const bg = sample ? opts.colourFor(sample) : '#666'
+      const on = active === c.key
+      const b = el('button', `chip ${on ? 'is-active' : ''}`)
+      b.type = 'button'
+      b.setAttribute('aria-pressed', String(on))
+      b.textContent = c.line
+      b.style.color = on ? opts.textFor(bg) : bg
+      b.style.borderColor = bg
+      b.style.background = on ? bg : 'transparent'
+      b.title = c.count === 1 ? '1 departure' : `${c.count} departures`
+      b.onclick = () => opts.onLine?.(c.key)
+      bar.append(b)
+    }
+    return bar
+  }
+
+  if (showChips) body.append(chipsRow())
+  if (filtered.length === 0) {
     body.append(noticeBody('Nothing due here in the next hour.', 'empty'))
     return body
   }
 
   // Group by mode, keeping each group in time order.
   const byMode = new Map<Product | 'other', Departure[]>()
-  for (const d of upcoming) {
+  for (const d of filtered) {
     const key = d.product ?? 'other'
     const list = byMode.get(key)
     if (list) list.push(d)
