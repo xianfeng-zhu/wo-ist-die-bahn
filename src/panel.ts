@@ -17,6 +17,8 @@
 // Escape, the close button, scroll position, and not trapping the page when it is
 // closed.
 
+import {icon} from './icons.js'
+
 export interface PanelContent {
   /** Big line at the top — a line name, a stop name. */
   title: string
@@ -32,6 +34,8 @@ export interface PanelContent {
   accent?: string
   /** Text colour to use on `accent`. */
   accentText?: string
+  /** Optional published line identity, distinct from the neutral panel theme. */
+  lineBadge?: string
   /** The scrolling content. */
   body: HTMLElement
   /** Show the Back control — there is a previous panel of ours to return to. */
@@ -58,6 +62,7 @@ export class Panel {
   private readonly titleEl: HTMLElement
   private readonly subtitleEl: HTMLElement
   private readonly summaryEl: HTMLElement
+  private readonly badgeEl: HTMLElement
   private readonly bodyEl: HTMLElement
   private readonly closeBtn: HTMLButtonElement
   private readonly backBtn: HTMLButtonElement
@@ -66,6 +71,7 @@ export class Panel {
   onClose: (() => void) | null = null
   /** Called when the user presses Back. */
   onBack: (() => void) | null = null
+  onShare: ((button: HTMLButtonElement) => void) | null = null
 
   constructor(parent: HTMLElement = document.body) {
     this.root = document.createElement('aside')
@@ -79,15 +85,24 @@ export class Panel {
 
     this.header = document.createElement('div')
     this.header.className = 'detail-head'
+    // In short windows this region scrolls independently of the list.
+    // Make that overflow reachable with a keyboard as well as a pointer.
+    const shortWindow = matchMedia('(min-width: 721px) and (max-height: 440px), (max-width: 519px) and (max-height: 640px)')
+    const focusableHeader = () => { this.header.tabIndex = shortWindow.matches ? 0 : -1 }
+    shortWindow.addEventListener('change', focusableHeader)
+    focusableHeader()
     const text = document.createElement('div')
     text.className = 'detail-headtext'
     this.titleEl = document.createElement('h2')
     this.titleEl.className = 'detail-title'
+    this.badgeEl = document.createElement('span')
+    this.badgeEl.className = 'detail-line'
+    this.badgeEl.hidden = true
     this.subtitleEl = document.createElement('p')
     this.subtitleEl.className = 'detail-sub'
     this.summaryEl = document.createElement('p')
     this.summaryEl.className = 'detail-summary'
-    text.append(this.titleEl, this.subtitleEl, this.summaryEl)
+    text.append(this.badgeEl, this.titleEl, this.subtitleEl, this.summaryEl)
 
     /*
      * Back AND close, on both layouts.
@@ -105,7 +120,7 @@ export class Panel {
     this.backBtn.type = 'button'
     this.backBtn.className = 'detail-back'
     this.backBtn.setAttribute('aria-label', 'Back')
-    this.backBtn.textContent = '‹'
+    this.backBtn.append(icon('back'), 'Back')
     this.backBtn.hidden = true
     this.backBtn.onclick = () => this.onBack?.()
 
@@ -113,13 +128,23 @@ export class Panel {
     this.closeBtn.type = 'button'
     this.closeBtn.className = 'detail-close'
     this.closeBtn.setAttribute('aria-label', 'Close')
-    this.closeBtn.textContent = '✕'
+    this.closeBtn.append(icon('close'))
     this.closeBtn.onclick = () => this.requestClose()
 
-    this.header.append(this.backBtn, text, this.closeBtn)
+    const toolbar = document.createElement('div')
+    toolbar.className = 'detail-toolbar'
+    toolbar.append(this.backBtn, this.closeBtn)
+    this.header.append(text)
     this.bodyEl = document.createElement('div')
     this.bodyEl.className = 'detail-body'
-    this.root.append(this.header, this.bodyEl)
+    const footer = document.createElement('div')
+    footer.className = 'detail-footer'
+    const share = document.createElement('button')
+    share.type = 'button'
+    share.append(icon('link'), 'Copy link')
+    share.onclick = () => this.onShare?.(share)
+    footer.append(share)
+    this.root.append(toolbar, this.header, this.bodyEl, footer)
     parent.append(this.root)
 
     // Escape closes, but only when this panel is the thing on screen — otherwise
@@ -152,14 +177,14 @@ export class Panel {
     this.subtitleEl.hidden = !content.subtitle
     this.summaryEl.textContent = content.summary ?? ''
     this.summaryEl.hidden = !content.summary
-    const accent = content.accent ?? '#333333'
-    this.header.style.background = accent
-    this.header.style.color = content.accentText ?? '#ffffff'
-    this.closeBtn.style.color = content.accentText ?? '#ffffff'
-    this.backBtn.style.color = content.accentText ?? '#ffffff'
+    this.root.style.setProperty('--route-color', content.accent ?? '#245a91')
+    this.root.style.setProperty('--route-text', content.accentText ?? '#ffffff')
+    this.badgeEl.textContent = content.lineBadge ?? ''
+    this.badgeEl.hidden = !content.lineBadge
     this.backBtn.hidden = !content.canGoBack
     this.root.classList.toggle('is-short', content.size === 'short')
     this.bodyEl.replaceChildren(content.body)
+    this.header.scrollTop = 0
     this.bodyEl.scrollTop = 0
     this.root.setAttribute('aria-label', content.title)
     if (!this.open) {

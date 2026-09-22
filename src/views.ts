@@ -389,7 +389,7 @@ export function stationView(
       if (d.delaySec != null && Math.abs(d.delaySec) >= 60) {
         at.append(el('em', 'strip-delay', d.delaySec > 0 ? `+${Math.round(d.delaySec / 60)}` : `${Math.round(d.delaySec / 60)}`))
       }
-      if (d.platform) where.append(el('span', 'dep-pltf', ` · ${d.platform}`))
+      if (d.platform) where.append(el('span', 'dep-pltf', `Platform ${d.platform}`))
       if (d.notices?.length) {
         const note = el('span', 'dep-notice', ' ⚠')
         note.title = d.notices.map(n => n.text).join(' · ')

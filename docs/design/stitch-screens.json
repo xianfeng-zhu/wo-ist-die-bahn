@@ -1,0 +1,74 @@
+{
+  "projectId": "641605759907392717",
+  "projectUrl": "https://stitch.withgoogle.com/projects/641605759907392717",
+  "designSystem": "assets/02755b4ec26043efa851fb3592d322ce",
+  "note": "Visual references reviewed against stitch-brief.md and interaction-checklist.md. Implementation preserves actual product behavior where generated sample content differs.",
+  "screens": [
+    {
+      "id": "9291d2d2467e40929ab723cdf8ac2688",
+      "title": "Desktop - Live Map Default View (Faithful)",
+      "device": "DESKTOP",
+      "resource": "projects/641605759907392717/screens/9291d2d2467e40929ab723cdf8ac2688"
+    },
+    {
+      "id": "3e71059042d846ee9d47b3e01f3c2e20",
+      "title": "Desktop - Vehicle Journey U8 (Faithful)",
+      "device": "DESKTOP",
+      "resource": "projects/641605759907392717/screens/3e71059042d846ee9d47b3e01f3c2e20"
+    },
+    {
+      "id": "da555c948342479db526e3c2badead54",
+      "title": "Desktop - Station Departures Alexanderplatz (Faithful)",
+      "device": "DESKTOP",
+      "resource": "projects/641605759907392717/screens/da555c948342479db526e3c2badead54"
+    },
+    {
+      "id": "b2b786005bad46c9b53f8e0098c77a88",
+      "title": "Mobile - Live Map Default View (Faithful)",
+      "device": "MOBILE",
+      "resource": "projects/641605759907392717/screens/b2b786005bad46c9b53f8e0098c77a88"
+    },
+    {
+      "id": "d241df0eb1dd4463994b023eb18ebe41",
+      "title": "Mobile - Selected Vehicle Journey U8 (Faithful)",
+      "device": "MOBILE",
+      "resource": "projects/641605759907392717/screens/d241df0eb1dd4463994b023eb18ebe41"
+    },
+    {
+      "id": "28dc1ea914824b52945b16fb4b158100",
+      "title": "Mobile - Map Filters & Settings (Faithful)",
+      "device": "MOBILE",
+      "resource": "projects/641605759907392717/screens/28dc1ea914824b52945b16fb4b158100"
+    },
+    {
+      "id": "84dfd127eee74c05ba77f1f1e5d74f98",
+      "title": "Mobile - Station Departures Alexanderplatz (Faithful)",
+      "device": "MOBILE",
+      "resource": "projects/641605759907392717/screens/84dfd127eee74c05ba77f1f1e5d74f98"
+    },
+    {
+      "id": "f3d3ea887db94265ba25bad3dac98bdb",
+      "title": "Mobile - Future Service Full Schedule (Faithful)",
+      "device": "MOBILE",
+      "resource": "projects/641605759907392717/screens/f3d3ea887db94265ba25bad3dac98bdb"
+    },
+    {
+      "id": "90a7a01c30e648139bdb12fb199304ee",
+      "title": "Desktop - Search Results (Faithful)",
+      "device": "DESKTOP",
+      "resource": "projects/641605759907392717/screens/90a7a01c30e648139bdb12fb199304ee"
+    },
+    {
+      "id": "88d0f26241dd469fbf1d5983cbf5d0a0",
+      "title": "Desktop - Detail State (Faithful)",
+      "device": "DESKTOP",
+      "resource": "projects/641605759907392717/screens/88d0f26241dd469fbf1d5983cbf5d0a0"
+    },
+    {
+      "id": "eb5240d7bad945229f1aa791fe9d9531",
+      "title": "Desktop - Severe Line Alerts (Faithful)",
+      "device": "DESKTOP",
+      "resource": "projects/641605759907392717/screens/eb5240d7bad945229f1aa791fe9d9531"
+    }
+  ]
+}

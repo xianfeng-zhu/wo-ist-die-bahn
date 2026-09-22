@@ -9,6 +9,7 @@ import {fetchJourneyDetail, fetchStationBoard} from './hci.js'
 import {markProgress, type JourneyDetail, type StationBoardPage} from './journey.js'
 import {berlinSecondsOfDay} from './format.js'
 import {Panel} from './panel.js'
+import {icon} from './icons.js'
 import {
   arrivalSummary, journeyFocusIndex, journeyView, lineChipsFor, noticeBody, stationView, vehicleView,
   type JourneyView, type VehicleView
@@ -885,6 +886,7 @@ function clearDetail(): void {
 }
 panel.onClose = () => closeDetail()
 panel.onBack = () => history.back()
+panel.onShare = button => { void copyShareLink(button) }
 
 const showVehicle = (id: string): void => navigate({kind: 'vehicle', id})
 const showStop = (id: string, name: string): void =>
@@ -922,8 +924,9 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
     detailTarget = {kind: 'vehicle', id: v.id}
     const bg = lineColors[v.line] ?? PRODUCT_COLORS[v.product]
     panel.show({
-      title: `${v.line} · ${PRODUCT_LABELS[v.product]}`,
-      subtitle: v.direction ? `to ${v.direction}` : undefined,
+      title: v.direction || v.line,
+      subtitle: `${PRODUCT_LABELS[v.product]} · Journey`,
+      lineBadge: v.line,
       summary: vehicleHeaderSummary(v),
       accent: bg,
       accentText: textOn(bg),
@@ -957,8 +960,9 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
   if (t.kind === 'journey') {
     const bg = lineColors[t.line] ?? (t.product ? PRODUCT_COLORS[t.product] : '#666666')
     panel.show({
-      title: t.line ? `${t.line}${t.product ? ` · ${PRODUCT_LABELS[t.product]}` : ''}` : 'Service',
-      subtitle: t.direction ? `to ${t.direction}` : undefined,
+      title: t.direction || t.line || 'Service',
+      subtitle: t.product ? `${PRODUCT_LABELS[t.product]} · Full schedule` : 'Full schedule',
+      lineBadge: t.line || undefined,
       summary: t.stopName ? `Your stop · ${t.stopName}` : 'Full schedule',
       accent: bg,
       accentText: textOn(bg),
@@ -1003,7 +1007,7 @@ async function applyTarget(t: DetailTarget | null): Promise<void> {
 
   panel.show({
     title: t.name,
-    subtitle: 'departures',
+    subtitle: 'Departures · Next hour',
     accent: '#37474f',
     accentText: '#ffffff',
     canGoBack: depthOf() > 1,
@@ -1125,19 +1129,12 @@ function renderStopDetail(): void {
  * it — an unconditional recentre on every tap is disorienting.
  */
 function keepClearOfPanel(lngLat: [number, number]): void {
-  const box = panel.occupies
-  if (!box) return
+  if (!panel.isOpen) return
+  const box = visibleRect()
   const pt = map.project(lngLat)
-  const margin = 24
-  let dx = 0
-  let dy = 0
-  if (Panel.isCompact) {
-    // sheet from the bottom: push the point up above its top edge
-    if (pt.y > box.top - margin) dy = pt.y - (box.top - margin)
-  } else {
-    // column on the left: push the point right of its edge
-    if (pt.x < box.right + margin) dx = pt.x - (box.right + margin)
-  }
+  const margin = Math.min(24, (box.right - box.left) / 4, (box.bottom - box.top) / 4)
+  const dx = pt.x - Math.max(box.left + margin, Math.min(pt.x, box.right - margin))
+  const dy = pt.y - Math.max(box.top + margin, Math.min(pt.y, box.bottom - margin))
   if (dx === 0 && dy === 0) return
   map.panBy([dx, dy], {duration: 400})
 }
@@ -1227,7 +1224,16 @@ function autoPan(lngLat: [number, number], duration: number): void {
 
 /** The map you can actually see: the container minus whatever the panel covers. */
 function visibleRect(): {left: number; top: number; right: number; bottom: number} {
-  const full = {left: 0, top: 0, right: innerWidth, bottom: innerHeight}
+  // The header and filter toolbar now share the map's top edge. Measure their
+  // actual bounds so a tracked vehicle cannot disappear under either of them.
+  const full = {left: 12, top: 12, right: innerWidth - 12, bottom: innerHeight - 28}
+  for (const id of ['app-header', 'filters']) {
+    if (id === 'filters' && Panel.isCompact) continue
+    const el = document.getElementById(id)
+    if (!el || getComputedStyle(el).visibility === 'hidden') continue
+    const r = el.getBoundingClientRect()
+    if (r.height && r.top < innerHeight / 2) full.top = Math.max(full.top, r.bottom + 12)
+  }
   const box = panel.occupies
   if (!box) return full
   // sheet along the bottom vs column down the left
@@ -1416,9 +1422,9 @@ async function copyShareLink(btn: HTMLButtonElement): Promise<void> {
   } catch {
     return // no share, no clipboard: nothing we can do quietly
   }
-  const original = btn.textContent
+  const original = [...btn.childNodes]
   btn.textContent = 'Copied'
-  setTimeout(() => { btn.textContent = original }, 1500)
+  setTimeout(() => { btn.replaceChildren(...original) }, 1500)
 }
 
 /** Read the URL and show what it names. Runs on first load and on Back/Forward. */
@@ -1544,6 +1550,18 @@ setInterval(() => { if (panel.isOpen) updateStripMarker() }, 250)
 
 const searchBox = document.createElement('div')
 searchBox.id = 'search'
+const appHeader = document.createElement('header')
+appHeader.id = 'app-header'
+const brand = document.createElement('div')
+brand.className = 'brand'
+const brandMark = document.createElement('span')
+brandMark.className = 'brand-mark'
+brandMark.append(icon('train'))
+const brandName = document.createElement('span')
+brandName.textContent = 'wo ist die bahn'
+brand.append(brandMark, brandName)
+const headerActions = document.createElement('div')
+headerActions.className = 'header-actions'
 const searchInput = document.createElement('input')
 searchInput.type = 'search'
 searchInput.id = 'search-input'
@@ -1554,8 +1572,9 @@ const searchResults = document.createElement('ul')
 searchResults.id = 'search-results'
 searchResults.setAttribute('role', 'listbox')
 searchResults.hidden = true
-searchBox.append(searchInput, searchResults)
-document.body.append(searchBox)
+searchBox.append(icon('search'), searchInput, searchResults)
+appHeader.append(brand, searchBox, headerActions)
+document.body.append(appHeader)
 
 /**
  * Show only this line, and frame all of it.
@@ -1580,17 +1599,15 @@ function focusLine(hit: {line: string; product: Product; key: string}): void {
 
   const on = vehicles.filter(v => lineKey(v) === hit.key)
   if (on.length === 0) return
-  // Room for the search box above, and for the panel if it is open.
-  const compact = Panel.isCompact
-  const box = panel.occupies
+  const box = visibleRect()
   const padding = {
-    top: 70,
-    bottom: compact && box ? Math.round(innerHeight - box.top) + 20 : 40,
-    left: !compact && box ? Math.round(box.right) + 20 : 40,
-    right: 40
+    top: Math.round(box.top) + 20,
+    bottom: Math.round(innerHeight - box.bottom) + 20,
+    left: Math.round(box.left) + 20,
+    right: Math.round(innerWidth - box.right) + 20
   }
   if (on.length === 1) {
-    map.easeTo({center: [on[0].lon, on[0].lat], zoom: Math.max(map.getZoom(), 13), duration: 700})
+    map.easeTo({center: [on[0].lon, on[0].lat], zoom: Math.max(map.getZoom(), 13), offset: visibleCentreOffset(), duration: 700})
     return
   }
   let west = 180, east = -180, south = 90, north = -90
@@ -1824,7 +1841,7 @@ filterTitle.textContent = 'Map view'
 const filterClose = document.createElement('button')
 filterClose.type = 'button'
 filterClose.className = 'filter-close'
-filterClose.textContent = '✕'
+filterClose.append(icon('close'))
 filterClose.setAttribute('aria-label', 'Close settings')
 filterClose.onclick = () => setSettingsOpen(false)
 filterHead.append(filterTitle, filterClose)
@@ -1843,11 +1860,11 @@ const compactQuery = matchMedia(`(max-width: ${COMPACT_MAX_WIDTH}px)`)
 const settingsToggle = document.createElement('button')
 settingsToggle.id = 'settings-toggle'
 settingsToggle.type = 'button'
-settingsToggle.textContent = '\u2699'
+settingsToggle.append(icon('filters'), 'Settings')
 settingsToggle.title = 'Settings'
 settingsToggle.setAttribute('aria-label', 'Settings')
 settingsToggle.setAttribute('aria-controls', 'filters')
-document.body.append(settingsToggle)
+headerActions.append(settingsToggle)
 
 function setSettingsOpen(open: boolean) {
   document.body.classList.toggle('settings-open', open)
@@ -2009,7 +2026,10 @@ function multiSelect(title: string) {
   const head = document.createElement('summary')
   const caption = document.createElement('span')
   caption.className = 'multi-caption'
-  head.append(`${title}: `, caption)
+  const name = document.createElement('span')
+  name.className = 'multi-label'
+  name.textContent = title
+  head.append(name, caption)
   const body = document.createElement('div')
   body.className = 'multi-body'
   box.append(head, body)
@@ -2307,10 +2327,18 @@ const shareRow = document.createElement('div')
 shareRow.className = 'mode'
 const shareBtn = document.createElement('button')
 shareBtn.type = 'button'
-shareBtn.textContent = 'Copy link'
+shareBtn.append(icon('link'), 'Copy link')
 shareBtn.title = 'Copy a link to this view'
 shareBtn.onclick = () => { void copyShareLink(shareBtn) }
-shareRow.append(shareBtn)
+headerActions.prepend(shareBtn)
+// The phone settings sheet hides the global header, so keep its share action
+// available inside the sheet too. Both buttons use exactly the same view state.
+const settingsShare = document.createElement('button')
+settingsShare.type = 'button'
+settingsShare.className = 'settings-share'
+settingsShare.append(icon('link'), 'Copy link')
+settingsShare.onclick = () => { void copyShareLink(settingsShare) }
+shareRow.append(settingsShare)
 const resetBtn = document.createElement('button')
 resetBtn.type = 'button'
 resetBtn.textContent = 'Reset'
