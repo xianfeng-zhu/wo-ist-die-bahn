@@ -390,18 +390,17 @@ export function stationView(
         at.append(el('em', 'strip-delay', d.delaySec > 0 ? `+${Math.round(d.delaySec / 60)}` : `${Math.round(d.delaySec / 60)}`))
       }
       if (d.platform) where.append(el('span', 'dep-pltf', `Platform ${d.platform}`))
-      if (d.notices?.length) {
-        const note = el('span', 'dep-notice', ' ⚠')
-        note.title = d.notices.map(n => n.text).join(' · ')
-        where.append(note)
-      }
-
       row.append(badge, where, at, when)
+      if (d.notices?.length) {
+        const notices = el('div', 'dep-notices')
+        for (const n of d.notices) notices.append(el('p', 'dep-notice', `⚠ ${n.text}`))
+        row.append(notices)
+      }
       if (opts.onPick && !d.cancelled) {
         row.classList.add('is-tappable')
         row.tabIndex = 0
         row.setAttribute('role', 'button')
-        row.setAttribute('aria-label', `${d.line} to ${d.direction}, ${etaLabel(mins)}`)
+        row.setAttribute('aria-label', `${d.line} to ${d.direction}, ${etaLabel(mins)}${d.notices?.length ? `. ${d.notices.map(n => n.text).join(' · ')}` : ''}`)
         const go = () => opts.onPick?.(d)
         row.onclick = go
         row.onkeydown = e => {

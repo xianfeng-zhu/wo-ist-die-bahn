@@ -205,7 +205,9 @@ body.detail-open #alerts, body.settings-open #alerts { display: none; }
 .dep-line { grid-column: 1; grid-row: 1 / 3; padding: 3px 4px; border-radius: 5px; font-size: 11px; font-weight: 800; text-align: center; }
 .dep-dir { grid-column: 2; grid-row: 1 / 3; font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
 .dep-pltf { display: block; font-size: 10px; font-weight: 400; color: var(--ink-dim); margin-top: 3px; }
-.dep-notice { color: var(--danger); cursor: help; }
+.dep-notices { grid-column: 2 / -1; grid-row: 3; min-width: 0; margin-top: 4px; }
+.dep-notice { margin: 0; color: var(--danger); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-line; }
+.dep-notice + .dep-notice { margin-top: 4px; }
 .dep-eta { grid-column: 3; grid-row: 1; text-align: right; font-size: 13px; font-weight: 700; color: var(--accent); white-space: nowrap; }
 .dep-at { grid-column: 3; grid-row: 2; text-align: right; font-size: 10px; color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dep.is-cancelled .dep-dir { text-decoration: line-through; color: var(--ink-dim); }
