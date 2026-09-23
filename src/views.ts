@@ -6,6 +6,7 @@
 
 import {clockTime, delayLabel, etaLabel, minutesUntil} from './format.js'
 import type {Departure, JourneyDetail, JourneyStop, StationNotice} from './journey.js'
+import {IMPORTANT_NOTICE_KINDS} from './notice.js'
 import {compareLineNames} from './vehicle.js'
 import type {Product, Vehicle} from './vehicle.js'
 
@@ -393,7 +394,12 @@ export function stationView(
       row.append(badge, where, at, when)
       if (d.notices?.length) {
         const notices = el('div', 'dep-notices')
-        for (const n of d.notices) notices.append(el('p', 'dep-notice', `⚠ ${n.text}`))
+        for (const n of d.notices) {
+          const warning = IMPORTANT_NOTICE_KINDS.has(n.kind)
+          const bicycle = n.kind === 'information' && /^Fahrradmitnahme möglich[.!]?$/i.test(n.text.trim())
+          const icon = warning ? '⚠️' : bicycle ? '🚲' : 'ℹ️'
+          notices.append(el('p', `dep-notice${warning ? ' dep-notice-warning' : ''}`, `${icon} ${n.text}`))
+        }
         row.append(notices)
       }
       if (opts.onPick && !d.cancelled) {
